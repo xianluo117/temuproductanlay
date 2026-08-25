@@ -1,0 +1,24 @@
+{
+  "name": "temu-product-analytics",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Temu 商品每日流量数据本地分析系统",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n SERVER,WEB -c blue,green \"npm run dev -w @temu-analytics/server\" \"npm run dev -w @temu-analytics/web\"",
+    "build": "npm run build -w @temu-analytics/shared && npm run build -w @temu-analytics/server && npm run build -w @temu-analytics/web",
+    "start": "npm run start -w @temu-analytics/server",
+    "test": "npm run test -w @temu-analytics/server",
+    "typecheck": "npm run build -w @temu-analytics/shared && npm run typecheck -w @temu-analytics/server && npm run typecheck -w @temu-analytics/web"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

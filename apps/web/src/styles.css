@@ -1,0 +1,64 @@
+* { box-sizing: border-box; }
+html, body, #root { min-height: 100%; margin: 0; }
+body { font-family: Inter, "Microsoft YaHei", "PingFang SC", sans-serif; color: #182230; background: #f4f6f9; }
+.app-layout { min-height: 100vh; }
+.app-sider { position: sticky !important; top: 0; height: 100vh; }
+.brand { height: 64px; padding: 0 20px; display: flex; align-items: center; gap: 12px; color: #fff; font-size: 17px; font-weight: 700; white-space: nowrap; overflow: hidden; }
+.brand .anticon { color: #ff7a3d; font-size: 22px; }
+.app-header { height: 64px; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #eaecf0; position: sticky; top: 0; z-index: 10; }
+.header-status { color: #667085; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #12b76a; box-shadow: 0 0 0 4px #d1fadf; }
+.app-content { padding: 28px; max-width: 1720px; width: 100%; margin: 0 auto; }
+.page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; margin-bottom: 24px; }
+.page-heading h2 { margin: 0 0 4px !important; letter-spacing: -.5px; }
+.metric-card { min-height: 132px; box-shadow: 0 1px 3px rgba(16,24,40,.06); }
+.metric-card .ant-statistic-content { font-weight: 700; }
+.metric-card .ant-typography { display: block; margin-top: 12px; font-size: 12px; }
+.positive { color: #039855; }.negative { color: #d92d20; }.muted { color: #98a2b3; }
+.section-row { margin-top: 16px; }
+.ant-card { box-shadow: 0 1px 3px rgba(16,24,40,.05); }
+.ant-image-img { object-fit: cover; border-radius: 8px; background: #f2f4f7; }
+.image-placeholder { width: 48px; height: 48px; border-radius: 8px; background: linear-gradient(135deg,#f2f4f7,#e4e7ec); }
+.image-placeholder.large { width: 58px; height: 58px; }
+.product-hero { max-height: 420px; object-fit: contain !important; }
+.product-empty-image { height: 280px; display: grid; place-items: center; color: #98a2b3; background: #f2f4f7; border-radius: 10px; }
+.product-meta { margin-top: 18px; }
+.preview-alert, .preview-table { margin-top: 16px; }
+.threshold-form { row-gap: 14px; }
+.ant-statistic-content-suffix small { margin-left: 8px; color: #667085; font-size: 12px; font-weight: 400; }
+.product-filter-card .ant-card-body { padding-top: 16px; }
+.filter-actions { margin-top: 20px; }
+.range-separator { width: 42px !important; padding: 0 !important; text-align: center; color: #98a2b3 !important; background: #fff !important; }
+.operation-content, .operation-note { margin-bottom: 0 !important; white-space: pre-wrap; min-width: 180px; }
+.operation-note { color: #667085; }
+.operation-form { margin-top: 20px; }
+.auth-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at top, #fff4ed 0, #f4f6f9 48%); }
+.auth-card { width: min(420px, 100%); }
+.auth-card .ant-segmented { margin: 24px 0 18px; }
+.default-admin-tip { display: block; margin-top: 16px; text-align: center; }
+.header-account { margin-left: auto; }
+.batch-operation-bar { margin-bottom: 16px; }
+.batch-failure-list { margin-bottom: 0 !important; white-space: pre-wrap; color: #b42318; }
+.comparison-control-card { background: linear-gradient(135deg, #fff 0%, #fff8f3 100%); border: 1px solid #ffeadf; }
+.comparison-help { display: block; margin-top: 12px; }
+.comparison-loading { min-height: 280px; display: grid; place-items: center; }
+.comparison-section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 28px 0 14px; }
+.comparison-section-heading h4 { margin: 0 0 3px !important; }
+.comparison-product-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.comparison-product-card { overflow: hidden; }
+.comparison-product-card .ant-card-body { padding: 0 18px 18px; }
+.comparison-product-image { height: 190px; margin: 0 -18px 16px; background: #f8fafc; display: grid; place-items: center; overflow: hidden; }
+.comparison-product-image .ant-image, .comparison-product-image .ant-image-img { width: 100%; height: 190px; object-fit: contain; }
+.comparison-product-image .product-empty-image { width: 100%; height: 190px; border-radius: 0; }
+.comparison-product-meta { width: 100%; }
+.comparison-color-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: 0 0 auto; box-shadow: 0 0 0 3px rgba(16,24,40,.05); }
+.comparison-metric-card { height: 100%; }
+.comparison-metric-card .ant-card-body { padding: 10px 20px; }
+.comparison-metric-row { min-height: 78px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid #f0f2f5; }
+.comparison-metric-row:last-child { border-bottom: 0; }
+.comparison-metric-row.winner { margin: 0 -10px; padding: 12px 10px; border-radius: 10px; background: linear-gradient(90deg, #fff8e6, #fff); }
+.comparison-spu-name { max-width: 145px; }
+.comparison-metric-value { text-align: right; }
+.comparison-metric-value .ant-statistic-content { font-size: 22px; font-weight: 700; }
+.comparison-metric-value .ant-typography { display: block; font-size: 12px; }
+@media (max-width: 900px) { .app-content { padding: 18px; } .page-heading { align-items: flex-start; flex-direction: column; } .app-sider { position: fixed !important; z-index: 20; } .header-account .ant-typography, .header-account .ant-btn span { display: none; } .comparison-section-heading { align-items: flex-start; } .comparison-metric-row { align-items: flex-start; } }

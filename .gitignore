@@ -1,0 +1,23 @@
+node_modules/
+dist/
+apps/*/dist/
+packages/*/dist/
+.env
+*.log
+*.tsbuildinfo
+/*.csv
+/*.xlsx
+.DS_Store
+Thumbs.db
+
+# Runtime data; keep directory placeholders only.
+data/database/*
+!data/database/.gitkeep
+data/images/*
+!data/images/.gitkeep
+data/imports/*
+!data/imports/.gitkeep
+data/backups/*
+!data/backups/.gitkeep
+data/temp/*
+!data/temp/.gitkeep
