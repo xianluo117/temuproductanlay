@@ -15,6 +15,10 @@ import type {
   ProductBatchOperationInput,
   ProductBatchOperationResult,
   ProductDetailResponse,
+  ProductManagementListResponse,
+  ProductManagementRecord,
+  ProductManagementRecordInput,
+  ProductManagementSettings,
   ProductOperationInput,
   ProductOperationRecord,
   ProductSummary,
@@ -127,6 +131,55 @@ export async function getProducts(
 ): Promise<ProductSummary[]> {
   return (
     await http.get<ApiResponse<ProductSummary[]>>("/products", { params })
+  ).data.data;
+}
+
+export async function getProductManagementRecords(
+  scope: "mine" | "shop" = "mine",
+): Promise<ProductManagementListResponse> {
+  return (
+    await http.get<ApiResponse<ProductManagementListResponse>>(
+      "/product-management",
+      { params: { scope } },
+    )
+  ).data.data;
+}
+
+export async function createProductManagementRecord(
+  input: ProductManagementRecordInput,
+): Promise<ProductManagementRecord> {
+  return (
+    await http.post<ApiResponse<ProductManagementRecord>>(
+      "/product-management",
+      input,
+    )
+  ).data.data;
+}
+
+export async function updateProductManagementRecord(
+  id: number,
+  input: ProductManagementRecordInput,
+): Promise<ProductManagementRecord> {
+  return (
+    await http.put<ApiResponse<ProductManagementRecord>>(
+      `/product-management/${id}`,
+      input,
+    )
+  ).data.data;
+}
+
+export async function deleteProductManagementRecord(id: number): Promise<void> {
+  await http.delete(`/product-management/${id}`);
+}
+
+export async function saveProductManagementSettings(
+  input: Omit<ProductManagementSettings, "updatedAt">,
+): Promise<ProductManagementSettings> {
+  return (
+    await http.put<ApiResponse<ProductManagementSettings>>(
+      "/product-management/settings",
+      input,
+    )
   ).data.data;
 }
 

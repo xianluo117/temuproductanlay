@@ -2,7 +2,11 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { paths } from "../config.js";
-import { migrateTemuShopProfiles, migrateToMultiUser } from "./migrations.js";
+import {
+  migrateProductManagement,
+  migrateTemuShopProfiles,
+  migrateToMultiUser,
+} from "./migrations.js";
 import { migrateBusinessDataToShops } from "./shop-data-migration.js";
 
 const schema = `
@@ -182,6 +186,7 @@ database.exec(schema);
 migrateToMultiUser(database, defaultSettings.anomalyThresholds);
 migrateTemuShopProfiles(database);
 migrateBusinessDataToShops(database, defaultSettings.anomalyThresholds);
+migrateProductManagement(database);
 
 database
   .prepare(

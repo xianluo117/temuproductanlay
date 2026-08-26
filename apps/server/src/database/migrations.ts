@@ -242,6 +242,92 @@ export function migrateToMultiUser(
   }
 }
 
+export function migrateProductManagement(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS product_management_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shop_profile_id INTEGER NOT NULL,
+      created_by_user_id INTEGER NOT NULL,
+      product_code TEXT NOT NULL CHECK (length(trim(product_code)) > 0),
+      internal_product_id TEXT,
+      note TEXT,
+      weight_kg REAL NOT NULL DEFAULT 0 CHECK (weight_kg >= 0),
+      goods_value REAL CHECK (goods_value IS NULL OR goods_value >= 0),
+      image_url TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (shop_profile_id) REFERENCES temu_shop_profiles(id) ON DELETE CASCADE,
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_management_records_shop_creator
+      ON product_management_records(shop_profile_id, created_by_user_id, updated_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_product_management_records_shop_code
+      ON product_management_records(shop_profile_id, product_code);
+
+    CREATE TABLE IF NOT EXISTS product_management_purchase_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      record_id INTEGER NOT NULL,
+      url TEXT NOT NULL CHECK (length(trim(url)) > 0),
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (record_id) REFERENCES product_management_records(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_management_purchase_links_record
+      ON product_management_purchase_links(record_id, sort_order, id);
+
+    CREATE TABLE IF NOT EXISTS product_management_spu_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      record_id INTEGER NOT NULL,
+      spu TEXT,
+      initial_review_price REAL CHECK (initial_review_price IS NULL OR initial_review_price >= 0),
+      review_price REAL CHECK (review_price IS NULL OR review_price >= 0),
+      activity_discount_override REAL CHECK (
+        activity_discount_override IS NULL OR
+        (activity_discount_override > 0 AND activity_discount_override <= 1)
+      ),
+      roas REAL CHECK (roas IS NULL OR roas >= 0),
+      order_count INTEGER CHECK (order_count IS NULL OR order_count >= 0),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (record_id) REFERENCES product_management_records(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_management_spu_links_record
+      ON product_management_spu_links(record_id, id);
+    CREATE INDEX IF NOT EXISTS idx_product_management_spu_links_spu
+      ON product_management_spu_links(spu) WHERE spu IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS product_management_bindings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      spu_link_id INTEGER NOT NULL,
+      skc_id TEXT,
+      sku_id TEXT,
+      skc_code TEXT,
+      sku_code TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CHECK (
+        skc_id IS NOT NULL OR sku_id IS NOT NULL OR
+        skc_code IS NOT NULL OR sku_code IS NOT NULL
+      ),
+      FOREIGN KEY (spu_link_id) REFERENCES product_management_spu_links(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_management_bindings_link
+      ON product_management_bindings(spu_link_id, id);
+    CREATE INDEX IF NOT EXISTS idx_product_management_bindings_skc
+      ON product_management_bindings(skc_id) WHERE skc_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_product_management_bindings_sku
+      ON product_management_bindings(sku_id) WHERE sku_id IS NOT NULL;
+  `);
+
+  database
+    .prepare(
+      `INSERT OR IGNORE INTO system_settings (key, value_json)
+       VALUES ('product_management_pricing', ?)`,
+    )
+    .run(
+      JSON.stringify({ shippingCostPerKg: 0, recommendedProfitMargin: 0.55 }),
+    );
+}
+
 export function migrateTemuShopProfiles(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS temu_shop_profiles (

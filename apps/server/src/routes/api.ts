@@ -50,6 +50,13 @@ import {
   updateGlobalOperation,
 } from "../operations/global-operation-service.js";
 import {
+  createProductManagementRecord,
+  deleteProductManagementRecord,
+  listProductManagementRecords,
+  updateProductManagementRecord,
+  updateProductManagementSettings,
+} from "../product-management/product-management-service.js";
+import {
   createProductOperation,
   createProductOperationsBatch,
   deleteProductOperation,
@@ -188,6 +195,119 @@ apiRouter.get("/products", (request, response) => {
     options.order = request.query.order;
   response.json({ data: getProducts(activeShopId(request), options) });
 });
+
+const nullableText = z.string().trim().max(500).nullable().default(null);
+const nullableNumber = z
+  .number()
+  .finite()
+  .nonnegative()
+  .nullable()
+  .default(null);
+const productManagementBindingSchema = z.object({
+  skcId: nullableText,
+  skuId: nullableText,
+  skcCode: nullableText,
+  skuCode: nullableText,
+});
+const productManagementSpuSchema = z.object({
+  spu: nullableText,
+  initialReviewPrice: nullableNumber,
+  reviewPrice: nullableNumber,
+  activityDiscountOverride: z
+    .number()
+    .positive()
+    .max(1)
+    .nullable()
+    .default(null),
+  roas: nullableNumber,
+  orderCount: z.number().int().nonnegative().nullable().default(null),
+  bindings: z.array(productManagementBindingSchema).max(500).default([]),
+});
+const productManagementRecordSchema = z.object({
+  productCode: z.string().trim().min(1).max(200),
+  note: z.string().max(3000).nullable().default(null),
+  weightKg: z.number().finite().nonnegative(),
+  purchaseLinks: z.array(z.string().url().max(2000)).max(30).default([]),
+  spuLinks: z.array(productManagementSpuSchema).max(100).default([]),
+});
+
+apiRouter.get("/product-management", (request, response, next) => {
+  try {
+    const scope = z
+      .enum(["mine", "shop"])
+      .default("mine")
+      .parse(request.query.scope);
+    response.json({
+      data: listProductManagementRecords(
+        activeShopId(request),
+        authenticatedUser(request),
+        scope,
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.post("/product-management", (request, response, next) => {
+  try {
+    response.status(201).json({
+      data: createProductManagementRecord(
+        activeShopId(request),
+        authenticatedUser(request),
+        productManagementRecordSchema.parse(request.body),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.put("/product-management/:id", (request, response, next) => {
+  try {
+    response.json({
+      data: updateProductManagementRecord(
+        z.coerce.number().int().positive().parse(request.params.id),
+        activeShopId(request),
+        authenticatedUser(request),
+        productManagementRecordSchema.parse(request.body),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.delete("/product-management/:id", (request, response, next) => {
+  try {
+    deleteProductManagementRecord(
+      z.coerce.number().int().positive().parse(request.params.id),
+      activeShopId(request),
+      authenticatedUser(request),
+    );
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.put(
+  "/product-management/settings",
+  requireAdministrator,
+  (request, response, next) => {
+    try {
+      const input = z
+        .object({
+          shippingCostPerKg: z.number().finite().nonnegative(),
+          recommendedProfitMargin: z.number().finite().min(0).lt(1),
+        })
+        .parse(request.body);
+      response.json({ data: updateProductManagementSettings(input) });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 apiRouter.get("/spu-comparison/candidates", (request, response) => {
   response.json({ data: listSpuComparisonCandidates(activeShopId(request)) });

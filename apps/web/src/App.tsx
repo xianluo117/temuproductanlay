@@ -47,6 +47,7 @@ import { GlobalOperationsPage } from "./pages/GlobalOperationsPage";
 import { ImportsPage } from "./pages/ImportsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProductDetailPage } from "./pages/ProductDetailPage";
+import { ProductManagementPage } from "./pages/ProductManagementPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { SpuComparisonPage } from "./pages/SpuComparisonPage";
 import { SystemBackupsPage } from "./pages/SystemBackupsPage";
@@ -87,6 +88,11 @@ export function App() {
 
   const menu = [
     { key: "/", icon: <BarChartOutlined />, label: "经营总览" },
+    {
+      key: "/product-management",
+      icon: <ProductOutlined />,
+      label: "产品管理",
+    },
     { key: "/products", icon: <ProductOutlined />, label: "SPU 数据" },
     { key: "/spu-comparison", icon: <SwapOutlined />, label: "SPU 对比" },
     {
@@ -194,6 +200,10 @@ export function App() {
           <Content className="app-content">
             <Routes>
               <Route path="/" element={<DashboardPage />} />
+              <Route
+                path="/product-management"
+                element={<ProductManagementPage />}
+              />
               <Route path="/products" element={<ProductsPage />} />
               <Route path="/products/:spu" element={<ProductDetailPage />} />
               <Route path="/spu-comparison" element={<SpuComparisonPage />} />

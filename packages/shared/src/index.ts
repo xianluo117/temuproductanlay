@@ -368,6 +368,89 @@ export interface TemuTrafficSyncActionResult {
   message: string;
 }
 
+export interface ProductManagementSettings {
+  shippingCostPerKg: number;
+  recommendedProfitMargin: number;
+  updatedAt: string | null;
+}
+
+export interface ProductManagementBinding {
+  id: number;
+  skcId: string | null;
+  skuId: string | null;
+  skcCode: string | null;
+  skuCode: string | null;
+}
+
+export interface ProductManagementSpuLink {
+  id: number;
+  spu: string | null;
+  initialReviewPrice: number | null;
+  reviewPrice: number | null;
+  reviewProfitMargin: number | null;
+  suggestedActivityDiscount: number | null;
+  activityDiscountOverride: number | null;
+  finalActivityDiscount: number | null;
+  activityPrice: number | null;
+  trafficPrice: number | null;
+  roas: number | null;
+  orderCount: number | null;
+  bindings: ProductManagementBinding[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductManagementRecord {
+  id: number;
+  shopProfileId: number;
+  createdByUserId: number;
+  createdByUsername: string;
+  canEdit: boolean;
+  productCode: string;
+  internalProductId: string | null;
+  note: string | null;
+  weightKg: number;
+  goodsValue: number | null;
+  totalCost: number | null;
+  recommendedPrice: number | null;
+  imageUrl: string | null;
+  purchaseLinks: string[];
+  spuLinks: ProductManagementSpuLink[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductManagementBindingInput {
+  skcId: string | null;
+  skuId: string | null;
+  skcCode: string | null;
+  skuCode: string | null;
+}
+
+export interface ProductManagementSpuLinkInput {
+  spu: string | null;
+  initialReviewPrice: number | null;
+  reviewPrice: number | null;
+  activityDiscountOverride: number | null;
+  roas: number | null;
+  orderCount: number | null;
+  bindings: ProductManagementBindingInput[];
+}
+
+export interface ProductManagementRecordInput {
+  productCode: string;
+  note: string | null;
+  weightKg: number;
+  purchaseLinks: string[];
+  spuLinks: ProductManagementSpuLinkInput[];
+}
+
+export interface ProductManagementListResponse {
+  scope: "mine" | "shop";
+  settings: ProductManagementSettings;
+  records: ProductManagementRecord[];
+}
+
 export interface ApiResponse<T> {
   data: T;
 }
