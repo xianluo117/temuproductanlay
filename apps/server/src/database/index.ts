@@ -1,8 +1,9 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import Database from 'better-sqlite3';
-import { paths } from '../config.js';
-import { migrateToMultiUser } from './migrations.js';
+import Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
+import { paths } from "../config.js";
+import { migrateTemuShopProfiles, migrateToMultiUser } from "./migrations.js";
+import { migrateBusinessDataToShops } from "./shop-data-migration.js";
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -174,11 +175,13 @@ function ensureDirectories(): void {
 ensureDirectories();
 
 export const database: Database.Database = new Database(paths.database);
-database.pragma('journal_mode = WAL');
-database.pragma('foreign_keys = ON');
-database.pragma('busy_timeout = 5000');
+database.pragma("journal_mode = WAL");
+database.pragma("foreign_keys = ON");
+database.pragma("busy_timeout = 5000");
 database.exec(schema);
 migrateToMultiUser(database, defaultSettings.anomalyThresholds);
+migrateTemuShopProfiles(database);
+migrateBusinessDataToShops(database, defaultSettings.anomalyThresholds);
 
 database
   .prepare(

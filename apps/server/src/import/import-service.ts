@@ -1,19 +1,19 @@
-import { createHash } from 'node:crypto';
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { nanoid } from 'nanoid';
 import type {
   ImportCommitResponse,
   ImportPreview,
   ProductSummary,
-} from '@temu-analytics/shared';
-import { paths } from '../config.js';
-import { database } from '../database/index.js';
-import { createUserBackup } from '../backup/user-backup-service.js';
-import { storeEmbeddedImage } from './image-service.js';
-import { notifyImageTaskProcessor } from './image-task-service.js';
-import { parseTemuWorkbook } from './parser.js';
-import type { ParsedProductRow, PendingImport, StoredImage } from './types.js';
+} from "@temu-analytics/shared";
+import { nanoid } from "nanoid";
+import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { createShopBackup } from "../backup/user-backup-service.js";
+import { paths } from "../config.js";
+import { database } from "../database/index.js";
+import { storeEmbeddedImage } from "./image-service.js";
+import { notifyImageTaskProcessor } from "./image-task-service.js";
+import { parseTemuWorkbook } from "./parser.js";
+import type { ParsedProductRow, PendingImport, StoredImage } from "./types.js";
 
 const pendingImports = new Map<string, PendingImport>();
 const TOKEN_TTL_MS = 30 * 60 * 1000;
@@ -30,13 +30,20 @@ function rate(numerator: number, denominator: number): number | null {
   return denominator > 0 ? numerator / denominator : null;
 }
 
-function toSummary(row: ParsedProductRow, imageUrl: string | null = null): ProductSummary {
+function toSummary(
+  row: ParsedProductRow,
+  imageUrl: string | null = null,
+): ProductSummary {
   return {
     date: row.date,
     spu: row.spu,
     firstListedAt: row.firstListedAt,
     imageUrl,
-    imageSource: row.embeddedImage ? 'embedded' : row.remoteImageUrl ? 'remote' : 'none',
+    imageSource: row.embeddedImage
+      ? "embedded"
+      : row.remoteImageUrl
+        ? "remote"
+        : "none",
     impressions: row.impressions,
     clicks: row.clicks,
     visitors: row.visitors,
@@ -65,22 +72,26 @@ function cleanExpiredTokens(): void {
 export async function createImportPreview(
   temporaryFilePath: string,
   originalFileName: string,
-  ownerId: number,
+  shopId: number,
 ): Promise<ImportPreview> {
   cleanExpiredTokens();
   const fileBuffer = await fs.readFile(temporaryFilePath);
-  const fileHash = createHash('sha256').update(fileBuffer).digest('hex');
+  const fileHash = createHash("sha256").update(fileBuffer).digest("hex");
   const parsed = await parseTemuWorkbook(temporaryFilePath, originalFileName);
-  const errorCount = parsed.issues.filter((issue) => issue.severity === 'error').length;
+  const errorCount = parsed.issues.filter(
+    (issue) => issue.severity === "error",
+  ).length;
   const existingRow = database
-    .prepare('SELECT COUNT(*) AS count FROM daily_metrics WHERE owner_id = ? AND data_date = ?')
-    .get(ownerId, parsed.dataDate) as CountRow;
+    .prepare(
+      "SELECT COUNT(*) AS count FROM daily_metrics WHERE shop_profile_id = ? AND data_date = ?",
+    )
+    .get(shopId, parsed.dataDate) as CountRow;
   const token = nanoid(24);
   const sample = parsed.rows.slice(0, 8).map((row) => toSummary(row));
 
   pendingImports.set(token, {
     token,
-    ownerId,
+    shopId,
     originalFileName,
     temporaryFilePath,
     fileHash,
@@ -94,7 +105,10 @@ export async function createImportPreview(
     fileName: originalFileName,
     dataDate: parsed.dataDate,
     rowCount: parsed.rows.length,
-    validRowCount: errorCount === 0 ? parsed.rows.length : Math.max(0, parsed.rows.length - errorCount),
+    validRowCount:
+      errorCount === 0
+        ? parsed.rows.length
+        : Math.max(0, parsed.rows.length - errorCount),
     duplicateDate: existingRow.count > 0,
     existingRowCount: existingRow.count,
     embeddedImageCount: parsed.embeddedImageCount,
@@ -104,7 +118,9 @@ export async function createImportPreview(
   };
 }
 
-async function storeEmbeddedImageOnly(row: ParsedProductRow): Promise<StoredImage | null> {
+async function storeEmbeddedImageOnly(
+  row: ParsedProductRow,
+): Promise<StoredImage | null> {
   if (!row.embeddedImage) return null;
   try {
     return await storeEmbeddedImage(row.embeddedImage);
@@ -116,26 +132,29 @@ async function storeEmbeddedImageOnly(row: ParsedProductRow): Promise<StoredImag
 export async function commitPendingImport(
   token: string,
   overwrite: boolean,
-  ownerId: number,
+  shopId: number,
 ): Promise<ImportCommitResponse> {
   cleanExpiredTokens();
   const pending = pendingImports.get(token);
-  if (!pending || pending.ownerId !== ownerId) throw new Error('导入预检已过期，请重新上传文件。');
-  if (pending.parsed.issues.some((issue) => issue.severity === 'error')) {
-    throw new Error('文件存在阻止导入的错误，请修正后重新上传。');
+  if (!pending || pending.shopId !== shopId)
+    throw new Error("导入预检已过期，请重新上传文件。");
+  if (pending.parsed.issues.some((issue) => issue.severity === "error")) {
+    throw new Error("文件存在阻止导入的错误，请修正后重新上传。");
   }
 
   const existingRows = database
-    .prepare('SELECT COUNT(*) AS count FROM daily_metrics WHERE owner_id = ? AND data_date = ?')
-    .get(ownerId, pending.parsed.dataDate) as CountRow;
+    .prepare(
+      "SELECT COUNT(*) AS count FROM daily_metrics WHERE shop_profile_id = ? AND data_date = ?",
+    )
+    .get(shopId, pending.parsed.dataDate) as CountRow;
   if (existingRows.count > 0 && !overwrite) {
-    throw new Error('该统计日期已有数据，请确认覆盖后再提交。');
+    throw new Error("该统计日期已有数据，请确认覆盖后再提交。");
   }
 
   try {
-    createUserBackup(ownerId, 'automatic');
+    createShopBackup(shopId, "automatic");
   } catch (error) {
-    const reason = error instanceof Error ? error.message : '未知错误';
+    const reason = error instanceof Error ? error.message : "未知错误";
     throw new Error(`自动备份失败，已取消本次导入：${reason}`);
   }
 
@@ -152,19 +171,19 @@ export async function commitPendingImport(
     const replacedBatch = database
       .prepare(
         `SELECT id FROM import_batches
-        WHERE owner_id = ? AND data_date = ? AND status = 'completed'
+        WHERE shop_profile_id = ? AND data_date = ? AND status = 'completed'
         ORDER BY id DESC LIMIT 1`,
       )
-      .get(ownerId, pending.parsed.dataDate) as BatchRow | undefined;
+      .get(shopId, pending.parsed.dataDate) as BatchRow | undefined;
 
     const batchResult = database
       .prepare(
         `INSERT INTO import_batches
-        (owner_id, file_name, stored_file_name, file_hash, data_date, row_count, status, issues_json, replaced_batch_id)
+        (shop_profile_id, file_name, stored_file_name, file_hash, data_date, row_count, status, issues_json, replaced_batch_id)
         VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)`,
       )
       .run(
-        ownerId,
+        shopId,
         pending.originalFileName,
         storedFileName,
         pending.fileHash,
@@ -177,40 +196,54 @@ export async function commitPendingImport(
 
     if (existingRows.count > 0) {
       const previousRows = database
-        .prepare('SELECT * FROM daily_metrics WHERE owner_id = ? AND data_date = ?')
-        .all(ownerId, pending.parsed.dataDate) as Array<Record<string, unknown>>;
+        .prepare(
+          "SELECT * FROM daily_metrics WHERE shop_profile_id = ? AND data_date = ?",
+        )
+        .all(shopId, pending.parsed.dataDate) as Array<Record<string, unknown>>;
       const savePrevious = database.prepare(
         `INSERT INTO import_replaced_metrics
-        (owner_id, replacement_batch_id, original_batch_id, data_date, spu, payload_json)
+        (shop_profile_id, replacement_batch_id, original_batch_id, data_date, spu, payload_json)
         VALUES (?, ?, ?, ?, ?, ?)`,
       );
       for (const previous of previousRows) {
         savePrevious.run(
-          ownerId,
+          shopId,
           batchId,
-          Number(previous.batch_id),
+          previous.batch_id === null ? null : Number(previous.batch_id),
           String(previous.data_date),
           String(previous.spu),
           JSON.stringify(previous),
         );
       }
-      database.prepare('DELETE FROM daily_metrics WHERE owner_id = ? AND data_date = ?').run(ownerId, pending.parsed.dataDate);
+      database
+        .prepare(
+          "DELETE FROM daily_metrics WHERE shop_profile_id = ? AND data_date = ?",
+        )
+        .run(shopId, pending.parsed.dataDate);
       if (replacedBatch) {
-        database.prepare("UPDATE import_batches SET status = 'rolled_back', rolled_back_at = CURRENT_TIMESTAMP WHERE id = ?").run(replacedBatch.id);
+        database
+          .prepare(
+            "UPDATE import_batches SET status = 'rolled_back', rolled_back_at = CURRENT_TIMESTAMP WHERE id = ?",
+          )
+          .run(replacedBatch.id);
       }
       if (replacedBatch) {
-        database.prepare(`
+        database
+          .prepare(
+            `
           UPDATE remote_image_tasks SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP,
             completed_at = CURRENT_TIMESTAMP
           WHERE batch_id = ? AND status IN ('pending', 'processing')
-        `).run(replacedBatch.id);
+        `,
+          )
+          .run(replacedBatch.id);
       }
     }
 
     const upsertProduct = database.prepare(
-      `INSERT INTO products (owner_id, spu, first_listed_at, image_asset_id, remote_image_url)
+      `INSERT INTO products (shop_profile_id, spu, first_listed_at, image_asset_id, remote_image_url)
        VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(owner_id, spu) DO UPDATE SET
+       ON CONFLICT(shop_profile_id, spu) DO UPDATE SET
          first_listed_at = COALESCE(excluded.first_listed_at, products.first_listed_at),
          image_asset_id = COALESCE(excluded.image_asset_id, products.image_asset_id),
          remote_image_url = COALESCE(excluded.remote_image_url, products.remote_image_url),
@@ -218,37 +251,43 @@ export async function commitPendingImport(
     );
     const insertMetric = database.prepare(
       `INSERT INTO daily_metrics
-       (owner_id, data_date, spu, batch_id, first_listed_at, impressions, clicks, visitors, cart_users,
+       (shop_profile_id, data_date, spu, batch_id, source_type, first_listed_at, impressions, clicks, visitors, cart_users,
         orders, detail_paid_buyers, detail_payment_conversion_rate,
         impression_order_conversion_rate, search_impressions)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, 'excel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const enqueueRemoteImage = database.prepare(`
-      INSERT OR IGNORE INTO remote_image_tasks (owner_id, batch_id, spu, image_url)
+      INSERT OR IGNORE INTO remote_image_tasks (shop_profile_id, batch_id, spu, image_url)
       SELECT ?, ?, ?, ?
       WHERE NOT EXISTS (
         SELECT 1 FROM remote_image_tasks
-        WHERE owner_id = ? AND spu = ? AND image_url = ? AND status = 'completed'
+        WHERE shop_profile_id = ? AND spu = ? AND image_url = ? AND status = 'completed'
       )
     `);
     let queuedImageCount = 0;
 
     for (const row of pending.parsed.rows) {
       const image = imageBySpu.get(row.spu) ?? null;
-      upsertProduct.run(ownerId, row.spu, row.firstListedAt, image?.assetId ?? null, row.remoteImageUrl);
+      upsertProduct.run(
+        shopId,
+        row.spu,
+        row.firstListedAt,
+        image?.assetId ?? null,
+        row.remoteImageUrl,
+      );
       if (!image && row.remoteImageUrl) {
         queuedImageCount += enqueueRemoteImage.run(
-          ownerId,
+          shopId,
           batchId,
           row.spu,
           row.remoteImageUrl,
-          ownerId,
+          shopId,
           row.spu,
           row.remoteImageUrl,
         ).changes;
       }
       insertMetric.run(
-        ownerId,
+        shopId,
         row.date,
         row.spu,
         batchId,

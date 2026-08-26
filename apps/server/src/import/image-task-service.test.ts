@@ -1,52 +1,89 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { database } from '../database/index.js';
-import { getBatchImageProgress, stopImageTaskProcessor } from './image-task-service.js';
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { database } from "../database/index.js";
+import {
+  getBatchImageProgress,
+  stopImageTaskProcessor,
+} from "./image-task-service.js";
 
-const spu = '__image_task_test_spu__';
+const suffix = Math.random().toString(36).slice(2, 10);
+const spu = `__image_task_test_spu_${suffix}__`;
+let shopId = 0;
 let batchId = 0;
-
-function cleanup(): void {
-  database.prepare('DELETE FROM remote_image_tasks WHERE spu = ?').run(spu);
-  database.prepare('DELETE FROM products WHERE spu = ?').run(spu);
-  if (batchId > 0) database.prepare('DELETE FROM import_batches WHERE id = ?').run(batchId);
-}
 
 beforeAll(() => {
   stopImageTaskProcessor();
-  cleanup();
-  database.prepare('INSERT INTO products (spu) VALUES (?)').run(spu);
-  const result = database.prepare(`
-    INSERT INTO import_batches
-      (file_name, stored_file_name, file_hash, data_date, row_count, status, issues_json)
-    VALUES ('task-test.xlsx', 'task-test.xlsx', 'task-test', '2099-01-01', 1, 'completed', '[]')
-  `).run();
+  const shop = database
+    .prepare(
+      `INSERT INTO temu_shop_profiles
+       (name, account_label, profile_key, cdp_port, fingerprint_seed)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(
+      `Image Task Test ${suffix}`,
+      `image-task-${suffix}`,
+      `temu/image-task-${suffix}`,
+      15103,
+      `image-task-fingerprint-${suffix}`,
+    );
+  shopId = Number(shop.lastInsertRowid);
+  database
+    .prepare("INSERT INTO products (shop_profile_id, spu) VALUES (?, ?)")
+    .run(shopId, spu);
+  const result = database
+    .prepare(
+      `INSERT INTO import_batches
+       (shop_profile_id, file_name, stored_file_name, file_hash, data_date,
+        row_count, status, issues_json)
+       VALUES (?, 'task-test.xlsx', 'task-test.xlsx', ?, '2099-01-01', 1,
+        'completed', '[]')`,
+    )
+    .run(shopId, `task-test-${suffix}`);
   batchId = Number(result.lastInsertRowid);
 });
 
 afterAll(() => {
-  cleanup();
+  database.prepare("DELETE FROM temu_shop_profiles WHERE id = ?").run(shopId);
 });
 
-describe('remote image task progress', () => {
-  it('returns a completed progress for a batch without tasks', () => {
-    expect(getBatchImageProgress(batchId)).toEqual({
-      total: 0, pending: 0, processing: 0, completed: 0, failed: 0, cancelled: 0, percent: 100,
+describe("remote image task progress", () => {
+  it("returns completed progress for a batch without tasks", () => {
+    expect(getBatchImageProgress(batchId, shopId)).toEqual({
+      total: 0,
+      pending: 0,
+      processing: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+      percent: 100,
     });
   });
 
-  it('aggregates pending, processing, completed, failed and cancelled tasks', () => {
-    const insert = database.prepare(`
-      INSERT INTO remote_image_tasks (batch_id, spu, image_url, status)
-      VALUES (?, ?, ?, ?)
-    `);
-    insert.run(batchId, spu, 'https://example.test/1.jpg', 'pending');
-    insert.run(batchId, spu, 'https://example.test/2.jpg', 'processing');
-    insert.run(batchId, spu, 'https://example.test/3.jpg', 'completed');
-    insert.run(batchId, spu, 'https://example.test/4.jpg', 'failed');
-    insert.run(batchId, spu, 'https://example.test/5.jpg', 'cancelled');
+  it("aggregates all task statuses within the shop", () => {
+    const insert = database.prepare(
+      `INSERT INTO remote_image_tasks
+       (shop_profile_id, batch_id, spu, image_url, status)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    insert.run(shopId, batchId, spu, "https://example.test/1.jpg", "pending");
+    insert.run(
+      shopId,
+      batchId,
+      spu,
+      "https://example.test/2.jpg",
+      "processing",
+    );
+    insert.run(shopId, batchId, spu, "https://example.test/3.jpg", "completed");
+    insert.run(shopId, batchId, spu, "https://example.test/4.jpg", "failed");
+    insert.run(shopId, batchId, spu, "https://example.test/5.jpg", "cancelled");
 
-    expect(getBatchImageProgress(batchId)).toEqual({
-      total: 5, pending: 1, processing: 1, completed: 1, failed: 1, cancelled: 1, percent: 60,
+    expect(getBatchImageProgress(batchId, shopId)).toEqual({
+      total: 5,
+      pending: 1,
+      processing: 1,
+      completed: 1,
+      failed: 1,
+      cancelled: 1,
+      percent: 60,
     });
   });
 });

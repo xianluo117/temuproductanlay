@@ -4,13 +4,16 @@ apps/*/dist/
 packages/*/dist/
 .env
 *.log
+__pycache__/
+*.pyc
 *.tsbuildinfo
 /*.csv
 /*.xlsx
 .DS_Store
 Thumbs.db
 
-# Runtime data; keep directory placeholders only.
+# Runtime data and local recovery snapshots; keep directory placeholders only.
+/backup/
 data/database/*
 !data/database/.gitkeep
 data/images/*
@@ -21,3 +24,5 @@ data/backups/*
 !data/backups/.gitkeep
 data/temp/*
 !data/temp/.gitkeep
+data/browser/*
+!data/browser/.gitkeep

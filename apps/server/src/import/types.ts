@@ -1,4 +1,8 @@
-import type { DailyMetric, ImportIssue, ProductSummary } from '@temu-analytics/shared';
+import type {
+  DailyMetric,
+  ImportIssue,
+  ProductSummary,
+} from "@temu-analytics/shared";
 
 export interface ParsedImage {
   rowNumber: number;
@@ -24,12 +28,12 @@ export interface ParsedWorkbook {
 export interface StoredImage {
   assetId: number;
   publicUrl: string;
-  source: 'embedded' | 'remote';
+  source: "embedded" | "remote";
 }
 
 export interface PendingImport {
   token: string;
-  ownerId: number;
+  shopId: number;
   originalFileName: string;
   temporaryFilePath: string;
   fileHash: string;

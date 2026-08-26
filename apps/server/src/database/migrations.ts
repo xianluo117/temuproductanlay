@@ -1,18 +1,26 @@
-import type Database from 'better-sqlite3';
-import { hashPassword } from '../auth/password.js';
+import type Database from "better-sqlite3";
+import { hashPassword } from "../auth/password.js";
 
 const BUSINESS_TABLES = [
-  'import_replaced_metrics',
-  'remote_image_tasks',
-  'product_operation_records',
-  'daily_metrics',
-  'products',
-  'global_operation_records',
-  'import_batches',
+  "import_replaced_metrics",
+  "remote_image_tasks",
+  "product_operation_records",
+  "daily_metrics",
+  "products",
+  "global_operation_records",
+  "import_batches",
 ] as const;
 
-function hasColumn(database: Database.Database, table: string, column: string): boolean {
-  return (database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((item) => item.name === column);
+function hasColumn(
+  database: Database.Database,
+  table: string,
+  column: string,
+): boolean {
+  return (
+    database.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+      name: string;
+    }>
+  ).some((item) => item.name === column);
 }
 
 function createTenantSchema(database: Database.Database): void {
@@ -169,7 +177,10 @@ function createTenantSchema(database: Database.Database): void {
   `);
 }
 
-export function migrateToMultiUser(database: Database.Database, defaultThresholds: unknown): void {
+export function migrateToMultiUser(
+  database: Database.Database,
+  defaultThresholds: unknown,
+): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,35 +193,101 @@ export function migrateToMultiUser(database: Database.Database, defaultThreshold
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
-  database.prepare(`
+  database
+    .prepare(
+      `
     INSERT OR IGNORE INTO users (id, username, password_hash, role, enabled, must_change_password)
     VALUES (1, 'admin', ?, 'admin', 1, 1)
-  `).run(hashPassword('password'));
+  `,
+    )
+    .run(hashPassword("password"));
 
-  const alreadyMigrated = hasColumn(database, 'products', 'owner_id');
-  if (!alreadyMigrated) {
-    database.pragma('foreign_keys = OFF');
+  const legacySchema = hasColumn(database, "products", "owner_id");
+  const alreadyMigrated = hasColumn(database, "products", "shop_profile_id");
+  if (legacySchema && !alreadyMigrated) {
+    database.pragma("foreign_keys = OFF");
     const migrate = database.transaction(() => {
-      for (const table of BUSINESS_TABLES) database.exec(`ALTER TABLE ${table} RENAME TO legacy_${table}`);
+      for (const table of BUSINESS_TABLES)
+        database.exec(`ALTER TABLE ${table} RENAME TO legacy_${table}`);
       createTenantSchema(database);
       database.exec(`
         INSERT INTO import_batches SELECT id, 1, file_name, stored_file_name, file_hash, data_date, row_count, status, issues_json, replaced_batch_id, imported_at, rolled_back_at FROM legacy_import_batches;
         INSERT INTO products SELECT 1, spu, first_listed_at, image_asset_id, remote_image_url, created_at, updated_at FROM legacy_products;
-        INSERT INTO daily_metrics SELECT id, 1, data_date, spu, batch_id, first_listed_at, impressions, clicks, visitors, cart_users, orders, detail_paid_buyers, detail_payment_conversion_rate, impression_order_conversion_rate, search_impressions, created_at FROM legacy_daily_metrics;
+        INSERT INTO daily_metrics SELECT id, 1, data_date, spu, NULLIF(batch_id, 0), first_listed_at, impressions, clicks, visitors, cart_users, orders, detail_paid_buyers, detail_payment_conversion_rate, impression_order_conversion_rate, search_impressions, created_at FROM legacy_daily_metrics;
         INSERT INTO product_operation_records SELECT id, 1, spu, operated_at, content, note, created_at, updated_at FROM legacy_product_operation_records;
         INSERT INTO global_operation_records SELECT id, 1, operated_at, content, note, created_at, updated_at FROM legacy_global_operation_records;
         INSERT INTO remote_image_tasks SELECT id, 1, batch_id, spu, image_url, status, attempt_count, last_error, next_attempt_at, created_at, started_at, completed_at, updated_at FROM legacy_remote_image_tasks;
         INSERT INTO import_replaced_metrics SELECT id, 1, replacement_batch_id, original_batch_id, data_date, spu, payload_json FROM legacy_import_replaced_metrics;
       `);
-      for (const table of BUSINESS_TABLES) database.exec(`DROP TABLE legacy_${table}`);
+      for (const table of BUSINESS_TABLES)
+        database.exec(`DROP TABLE legacy_${table}`);
     });
     migrate();
-    database.pragma('foreign_keys = ON');
-  } else {
+    database.pragma("foreign_keys = ON");
+  } else if (!alreadyMigrated) {
     createTenantSchema(database);
   }
 
-  const existingThreshold = database.prepare("SELECT value_json FROM system_settings WHERE key = 'anomaly_thresholds'").get() as { value_json: string } | undefined;
-  database.prepare(`INSERT OR IGNORE INTO user_settings (owner_id, key, value_json) VALUES (1, 'anomaly_thresholds', ?)`)
-    .run(existingThreshold?.value_json ?? JSON.stringify(defaultThresholds));
+  if (legacySchema) {
+    const existingThreshold = database
+      .prepare(
+        "SELECT value_json FROM system_settings WHERE key = 'anomaly_thresholds'",
+      )
+      .get() as { value_json: string } | undefined;
+    database
+      .prepare(
+        `INSERT OR IGNORE INTO user_settings (owner_id, key, value_json) VALUES (1, 'anomaly_thresholds', ?)`,
+      )
+      .run(existingThreshold?.value_json ?? JSON.stringify(defaultThresholds));
+  }
+}
+
+export function migrateTemuShopProfiles(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS temu_shop_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+      account_label TEXT NOT NULL CHECK (length(trim(account_label)) > 0),
+      profile_key TEXT NOT NULL UNIQUE,
+      mall_id TEXT UNIQUE,
+      cdp_port INTEGER NOT NULL UNIQUE CHECK (cdp_port BETWEEN 1024 AND 65535),
+      fingerprint_seed TEXT NOT NULL UNIQUE,
+      locale TEXT NOT NULL DEFAULT 'zh-CN',
+      timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+      runtime_status TEXT NOT NULL DEFAULT 'STOPPED'
+        CHECK (runtime_status IN ('STOPPED', 'STARTING', 'READY', 'LOGIN_REQUIRED', 'RISK_BLOCKED', 'ERROR')),
+      process_id INTEGER,
+      last_started_at TEXT,
+      last_checked_at TEXT,
+      last_success_at TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS temu_shop_user_grants (
+      shop_profile_id INTEGER NOT NULL,
+      user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (shop_profile_id, user_id),
+      FOREIGN KEY (shop_profile_id) REFERENCES temu_shop_profiles(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_temu_shop_user_grants_user
+      ON temu_shop_user_grants(user_id, shop_profile_id);
+
+    CREATE TABLE IF NOT EXISTS temu_browser_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shop_profile_id INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      status TEXT CHECK (status IS NULL OR status IN ('STOPPED', 'STARTING', 'READY', 'LOGIN_REQUIRED', 'RISK_BLOCKED', 'ERROR')),
+      message TEXT,
+      details_json TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (shop_profile_id) REFERENCES temu_shop_profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_temu_browser_events_shop_created
+      ON temu_browser_events(shop_profile_id, created_at DESC, id DESC);
+  `);
 }

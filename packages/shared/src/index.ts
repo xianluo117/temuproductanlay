@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'user';
+export type UserRole = "admin" | "user";
 
 export interface UserAccount {
   id: number;
@@ -10,9 +10,18 @@ export interface UserAccount {
   updatedAt: string;
 }
 
+export interface ShopAccess {
+  id: number;
+  name: string;
+  accountLabel: string;
+  mallId: string | null;
+  enabled: boolean;
+}
+
 export interface AuthSession {
   user: UserAccount;
-  activeDataOwner: UserAccount;
+  activeShop: ShopAccess;
+  availableShops: ShopAccess[];
 }
 
 export interface LoginInput {
@@ -37,15 +46,15 @@ export interface AdminPasswordResetInput {
 }
 
 export type MetricKey =
-  | 'impressions'
-  | 'clicks'
-  | 'visitors'
-  | 'cartUsers'
-  | 'orders'
-  | 'detailPaidBuyers'
-  | 'detailPaymentConversionRate'
-  | 'impressionOrderConversionRate'
-  | 'searchImpressions';
+  | "impressions"
+  | "clicks"
+  | "visitors"
+  | "cartUsers"
+  | "orders"
+  | "detailPaidBuyers"
+  | "detailPaymentConversionRate"
+  | "impressionOrderConversionRate"
+  | "searchImpressions";
 
 export interface DailyMetric {
   date: string;
@@ -62,7 +71,7 @@ export interface DailyMetric {
   searchImpressions: number;
 }
 
-export type ImageSource = 'embedded' | 'remote' | 'none';
+export type ImageSource = "embedded" | "remote" | "none";
 
 export interface ProductSummary extends DailyMetric {
   imageUrl: string | null;
@@ -138,6 +147,8 @@ export interface ProductOperationRecord {
   operatedAt: string;
   content: string;
   note: string | null;
+  createdByUsername: string;
+  updatedByUsername: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -153,6 +164,8 @@ export interface GlobalOperationRecord {
   operatedAt: string;
   content: string;
   note: string | null;
+  createdByUsername: string;
+  updatedByUsername: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -162,7 +175,7 @@ export type GlobalOperationInput = ProductOperationInput;
 export interface ImportIssue {
   row: number | null;
   field: string | null;
-  severity: 'warning' | 'error';
+  severity: "warning" | "error";
   message: string;
 }
 
@@ -180,7 +193,12 @@ export interface ImportPreview {
   sample: ProductSummary[];
 }
 
-export type ImageTaskStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+export type ImageTaskStatus =
+  | "pending"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface ProductBatchOperationInput extends ProductOperationInput {
   spus: string[];
@@ -223,23 +241,23 @@ export interface ImportBatch {
   dataDate: string;
   rowCount: number;
   importedAt: string;
-  status: 'completed' | 'failed' | 'rolled_back';
+  status: "completed" | "failed" | "rolled_back";
   replacedBatchId: number | null;
   issueCount: number;
   imageProgress: ImageTaskProgress;
 }
 
 export type AnomalyType =
-  | 'impressions_drop'
-  | 'ctr_drop'
-  | 'cart_rate_drop'
-  | 'conversion_drop'
-  | 'zero_orders'
-  | 'data_quality';
+  | "impressions_drop"
+  | "ctr_drop"
+  | "cart_rate_drop"
+  | "conversion_drop"
+  | "zero_orders"
+  | "data_quality";
 
 export interface AnomalyItem {
   type: AnomalyType;
-  severity: 'info' | 'warning' | 'critical';
+  severity: "info" | "warning" | "critical";
   spu: string;
   date: string;
   title: string;
@@ -256,6 +274,98 @@ export interface AnomalyThresholds {
   conversionRateDrop: number;
   consecutiveZeroOrderDays: number;
   minimumImpressions: number;
+}
+
+export type TemuBrowserRuntimeStatus =
+  | "STOPPED"
+  | "STARTING"
+  | "READY"
+  | "LOGIN_REQUIRED"
+  | "RISK_BLOCKED"
+  | "ERROR";
+
+export interface TemuShopGrantUser {
+  id: number;
+  username: string;
+}
+
+export interface TemuShopProfile {
+  id: number;
+  name: string;
+  accountLabel: string;
+  profileKey: string;
+  mallId: string | null;
+  cdpPort: number;
+  fingerprintSeed: string;
+  locale: string;
+  timezone: string;
+  enabled: boolean;
+  runtimeStatus: TemuBrowserRuntimeStatus;
+  processId: number | null;
+  lastStartedAt: string | null;
+  lastCheckedAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  grantedUsers: TemuShopGrantUser[];
+}
+
+export interface TemuShopProfileCreateInput {
+  name: string;
+  accountLabel: string;
+  locale?: string;
+  timezone?: string;
+  enabled?: boolean;
+  grantedUserIds?: number[];
+}
+
+export interface TemuShopProfileUpdateInput {
+  name?: string | undefined;
+  accountLabel?: string | undefined;
+  locale?: string | undefined;
+  timezone?: string | undefined;
+  enabled?: boolean | undefined;
+}
+
+export interface TemuShopGrantUpdateInput {
+  userIds: number[];
+}
+
+export interface TemuBrowserEvent {
+  id: number;
+  shopProfileId: number;
+  eventType: string;
+  status: TemuBrowserRuntimeStatus | null;
+  message: string | null;
+  details: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface TemuBrowserActionResult {
+  profile: TemuShopProfile;
+  message: string;
+}
+
+export interface TemuTrafficSyncStatus {
+  id: number;
+  shopProfileId: number;
+  requestedByUsername: string;
+  timeDimension: number;
+  pageSize: number;
+  totalPages: number;
+  totalItems: number;
+  importedItems: number;
+  replacedItems: number;
+  status: "running" | "completed" | "failed";
+  startedAt: string;
+  completedAt: string | null;
+  errorMessage: string | null;
+}
+
+export interface TemuTrafficSyncActionResult {
+  sync: TemuTrafficSyncStatus;
+  message: string;
 }
 
 export interface ApiResponse<T> {
