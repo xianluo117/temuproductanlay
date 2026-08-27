@@ -103,6 +103,10 @@ def image_versions(image_bytes: bytes) -> list[np.ndarray[Any, Any]]:
 
 def recognize_expression(image_bytes: bytes) -> str:
     tesseract_cmd = os.getenv("TESSERACT_CMD", "").strip()
+    if not tesseract_cmd and os.name == "nt":
+        default_tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.isfile(default_tesseract_cmd):
+            tesseract_cmd = default_tesseract_cmd
     if tesseract_cmd:
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
     candidates: Counter[str] = Counter()
@@ -388,10 +392,17 @@ def main() -> None:
     except WorkerError as error:
         print(json.dumps({"ok": False, "error": {"code": error.code, "message": str(error)}}, ensure_ascii=False))
         raise SystemExit(1)
-    except Exception:
+    except Exception as error:
+        message = str(error).strip() or type(error).__name__
         print(
             json.dumps(
-                {"ok": False, "error": {"code": "WORKER_ERROR", "message": "智猴协议工作器执行失败"}},
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "WORKER_ERROR",
+                        "message": f"智猴协议工作器执行失败: {message}",
+                    },
+                },
                 ensure_ascii=False,
             )
         )
