@@ -202,9 +202,10 @@ export function migrateToMultiUser(
     )
     .run(hashPassword("password"));
 
-  const legacySchema = hasColumn(database, "products", "owner_id");
-  const alreadyMigrated = hasColumn(database, "products", "shop_profile_id");
-  if (legacySchema && !alreadyMigrated) {
+  const tenantSchema = hasColumn(database, "products", "owner_id");
+  const shopSchema = hasColumn(database, "products", "shop_profile_id");
+  const legacySchema = !tenantSchema && !shopSchema;
+  if (legacySchema) {
     database.pragma("foreign_keys = OFF");
     const migrate = database.transaction(() => {
       for (const table of BUSINESS_TABLES)
@@ -224,7 +225,7 @@ export function migrateToMultiUser(
     });
     migrate();
     database.pragma("foreign_keys = ON");
-  } else if (!alreadyMigrated) {
+  } else if (tenantSchema) {
     createTenantSchema(database);
   }
 
