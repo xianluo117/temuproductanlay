@@ -191,8 +191,8 @@ export function runDatabaseMigrations(): void {
   migrateToMultiUser(database, defaultThresholds);
   migrateTemuShopProfiles(database);
   migrateTemuLifecycle(database);
-  ensureShopBusinessSchema(database);
   migrateBusinessDataToShops(database, defaultThresholds);
+  ensureShopBusinessSchema(database);
   migrateProductManagement(database);
   migrateZhihouErp(database);
 }

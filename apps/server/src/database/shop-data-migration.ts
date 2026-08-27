@@ -152,15 +152,9 @@ export function ensureShopBusinessSchema(database: Database.Database): void {
     );
   }
 
-  database.pragma("foreign_keys = OFF");
-  try {
-    for (const table of [...BUSINESS_TABLES].reverse()) {
-      database.exec(`DROP TABLE IF EXISTS ${table}`);
-    }
-    createShopBusinessSchema(database);
-  } finally {
-    database.pragma("foreign_keys = ON");
-  }
+  // 空数据库仍需保留当前业务表，后续迁移会将其转换为店铺级结构。
+  // 此处若提前删除，migrateBusinessDataToShops 会在统计或重命名表时失败。
+  createShopBusinessSchema(database);
 }
 
 export function migrateBusinessDataToShops(
@@ -172,10 +166,8 @@ export function migrateBusinessDataToShops(
     return;
   }
 
-  // 没有旧版业务数据时，独立迁移命令应安全退出，不要求预先创建店铺。
-  if (businessRowCount(database) === 0) return;
-
-  const shopId = onlyShopProfileId(database);
+  const shopId =
+    businessRowCount(database) === 0 ? null : onlyShopProfileId(database);
   database.pragma("foreign_keys = OFF");
   database.exec(`
     DROP INDEX IF EXISTS idx_import_batches_owner_date;
@@ -409,24 +401,26 @@ export function migrateBusinessDataToShops(
 
     createShopBusinessSchema(database);
 
-    database.exec(`
-      INSERT OR IGNORE INTO temu_shop_user_grants (shop_profile_id, user_id)
-      SELECT ${shopId}, id FROM users;
-    `);
+    if (shopId !== null) {
+      database.exec(`
+        INSERT OR IGNORE INTO temu_shop_user_grants (shop_profile_id, user_id)
+        SELECT ${shopId}, id FROM users;
+      `);
 
-    const thresholdRows = database
-      .prepare(
-        "SELECT value_json FROM user_settings WHERE key = 'anomaly_thresholds' ORDER BY owner_id",
-      )
-      .all() as Array<{ value_json: string }>;
-    database
-      .prepare(
-        "INSERT OR REPLACE INTO shop_settings (shop_profile_id, key, value_json) VALUES (?, 'anomaly_thresholds', ?)",
-      )
-      .run(
-        shopId,
-        thresholdRows[0]?.value_json ?? JSON.stringify(defaultThresholds),
-      );
+      const thresholdRows = database
+        .prepare(
+          "SELECT value_json FROM user_settings WHERE key = 'anomaly_thresholds' ORDER BY owner_id",
+        )
+        .all() as Array<{ value_json: string }>;
+      database
+        .prepare(
+          "INSERT OR REPLACE INTO shop_settings (shop_profile_id, key, value_json) VALUES (?, 'anomaly_thresholds', ?)",
+        )
+        .run(
+          shopId,
+          thresholdRows[0]?.value_json ?? JSON.stringify(defaultThresholds),
+        );
+    }
 
     for (const table of [...BUSINESS_TABLES].reverse()) {
       database.exec(`DROP TABLE legacy_shop_${table}`);
@@ -437,11 +431,13 @@ export function migrateBusinessDataToShops(
         "ALTER TABLE sessions ADD COLUMN active_shop_profile_id INTEGER",
       );
     }
-    database
-      .prepare(
-        "UPDATE sessions SET active_shop_profile_id = ? WHERE active_shop_profile_id IS NULL",
-      )
-      .run(shopId);
+    if (shopId !== null) {
+      database
+        .prepare(
+          "UPDATE sessions SET active_shop_profile_id = ? WHERE active_shop_profile_id IS NULL",
+        )
+        .run(shopId);
+    }
   });
 
   try {
