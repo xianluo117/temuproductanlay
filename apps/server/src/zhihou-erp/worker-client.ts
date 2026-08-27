@@ -72,6 +72,8 @@ export function runZhihouWorker<T>(input: {
         windowsHide: true,
         env: {
           ...process.env,
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUTF8: "1",
           ZHIHOU_LOGIN_MAX_ATTEMPTS: String(config.zhihouLoginMaxAttempts),
         },
       },
