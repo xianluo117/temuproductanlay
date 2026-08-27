@@ -37,11 +37,30 @@ function onlyShopProfileId(database: Database.Database): number {
   const rows = database
     .prepare("SELECT id FROM temu_shop_profiles ORDER BY id")
     .all() as Array<{ id: number }>;
-  if (rows.length !== 1) {
-    if (businessRowCount(database) === 0 && rows.length > 0) return rows[0]!.id;
-    throw new Error("旧业务数据迁移要求数据库中恰好存在一个 Temu 店铺档案。");
+  if (rows.length === 1) return rows[0]!.id;
+  if (businessRowCount(database) === 0 && rows.length > 0) return rows[0]!.id;
+
+  if (rows.length === 0) {
+    // 独立迁移程序可以处理尚未创建店铺档案的旧数据库。
+    const result = database
+      .prepare(
+        `
+        INSERT INTO temu_shop_profiles
+          (name, account_label, profile_key, cdp_port, fingerprint_seed)
+        VALUES (?, ?, ?, ?, ?)
+        `,
+      )
+      .run(
+        "历史业务数据店铺",
+        "legacy",
+        "legacy-migrated-shop",
+        19242,
+        "legacy-migrated-shop",
+      );
+    return Number(result.lastInsertRowid);
   }
-  return rows[0]!.id;
+
+  throw new Error("旧业务数据迁移无法自动选择多个 Temu 店铺档案。");
 }
 
 function createShopBusinessSchema(database: Database.Database): void {
@@ -121,6 +140,29 @@ function createShopBusinessSchema(database: Database.Database): void {
   `);
 }
 
+export function ensureShopBusinessSchema(database: Database.Database): void {
+  if (hasColumn(database, "products", "shop_profile_id")) {
+    createShopBusinessSchema(database);
+    return;
+  }
+
+  if (businessRowCount(database) > 0) {
+    throw new Error(
+      "检测到尚未迁移的旧版业务数据，请先关闭系统并运行 migrate-shops.bat。",
+    );
+  }
+
+  database.pragma("foreign_keys = OFF");
+  try {
+    for (const table of [...BUSINESS_TABLES].reverse()) {
+      database.exec(`DROP TABLE IF EXISTS ${table}`);
+    }
+    createShopBusinessSchema(database);
+  } finally {
+    database.pragma("foreign_keys = ON");
+  }
+}
+
 export function migrateBusinessDataToShops(
   database: Database.Database,
   defaultThresholds: unknown,
@@ -129,6 +171,9 @@ export function migrateBusinessDataToShops(
     createShopBusinessSchema(database);
     return;
   }
+
+  // 没有旧版业务数据时，独立迁移命令应安全退出，不要求预先创建店铺。
+  if (businessRowCount(database) === 0) return;
 
   const shopId = onlyShopProfileId(database);
   database.pragma("foreign_keys = OFF");

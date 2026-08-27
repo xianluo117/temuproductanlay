@@ -5,23 +5,6 @@ Set-Location $root
 $startedProcesses = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
 $stopRequested = $false
 
-function Invoke-NativeCheck {
-    param([Parameter(Mandatory = $true)][scriptblock]$Command)
-
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        # PowerShell 5.1 会把原生命令写入 stderr 的内容包装为 NativeCommandError。
-        # 依赖探测失败属于预期分支，应通过退出码判断，而不是中断启动脚本。
-        $ErrorActionPreference = 'SilentlyContinue'
-        & $Command *> $null
-        $exitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-
-    return $exitCode
-}
-
 function Stop-ProjectProcesses {
     param([switch]$IncludeServer)
 
@@ -57,7 +40,7 @@ try {
     # 启动前清理本项目残留进程，避免端口或 Profile 被占用。
     Stop-ProjectProcesses -IncludeServer
 
-    Write-Host '[1/5] Installing Node.js dependencies if needed...'
+    Write-Host '[1/3] Installing Node.js dependencies if needed...'
     if (-not (Test-Path 'node_modules')) {
         npm install
         if ($LASTEXITCODE -ne 0) { throw 'npm install failed.' }
@@ -65,31 +48,11 @@ try {
         Write-Host 'Node.js dependencies are ready.'
     }
 
-    Write-Host '[2/5] Checking Python...'
-    $pythonCheckExitCode = Invoke-NativeCheck { python --version }
-    if ($pythonCheckExitCode -ne 0) { throw 'Python was not found. Install Python 3.12 or later and add it to PATH.' }
-
-    Write-Host '[3/5] Checking CloakBrowser...'
-    $cloakBrowserImportExitCode = Invoke-NativeCheck { python -c 'import cloakbrowser' }
-    if ($cloakBrowserImportExitCode -ne 0) {
-        Write-Host 'CloakBrowser Python package was not found. Installing dependencies...'
-        python -m pip install -r apps\browser-worker\requirements.txt
-        if ($LASTEXITCODE -ne 0) { throw 'CloakBrowser dependencies installation failed.' }
-    }
-    $cloakBrowserBinaryExitCode = Invoke-NativeCheck {
-        python -c "from cloakbrowser import binary_info; raise SystemExit(0 if binary_info().get('installed') else 1)"
-    }
-    if ($cloakBrowserBinaryExitCode -ne 0) {
-        Write-Host 'Installing CloakBrowser binary. The first download may take several minutes...'
-        python -m cloakbrowser install
-        if ($LASTEXITCODE -ne 0) { throw 'CloakBrowser binary installation failed.' }
-    }
-
-    Write-Host '[4/5] Building application...'
+    Write-Host '[2/3] Building application...'
     npm run build
     if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
 
-    Write-Host '[5/5] Starting Temu Analytics...'
+    Write-Host '[3/3] Starting Temu Analytics...'
     $openBrowser = Start-Process -FilePath 'node' -ArgumentList 'tools\open-browser-when-ready.mjs' -WorkingDirectory $root -PassThru -WindowStyle Hidden
     $startedProcesses.Add($openBrowser)
 

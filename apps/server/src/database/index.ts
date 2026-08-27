@@ -7,8 +7,12 @@ import {
   migrateTemuLifecycle,
   migrateTemuShopProfiles,
   migrateToMultiUser,
+  migrateZhihouErp,
 } from "./migrations.js";
-import { migrateBusinessDataToShops } from "./shop-data-migration.js";
+import {
+  ensureShopBusinessSchema,
+  migrateBusinessDataToShops,
+} from "./shop-data-migration.js";
 
 const schema = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -154,15 +158,13 @@ CREATE TABLE IF NOT EXISTS import_replaced_metrics (
 CREATE INDEX IF NOT EXISTS idx_replaced_metrics_batch ON import_replaced_metrics(replacement_batch_id);
 `;
 
-const defaultSettings = {
-  anomalyThresholds: {
-    impressionsDrop: 0.3,
-    clickThroughRateDrop: 0.25,
-    cartRateDrop: 0.3,
-    conversionRateDrop: 0.3,
-    consecutiveZeroOrderDays: 3,
-    minimumImpressions: 50,
-  },
+const defaultThresholds = {
+  impressionsDrop: 0.3,
+  clickThroughRateDrop: 0.25,
+  cartRateDrop: 0.3,
+  conversionRateDrop: 0.3,
+  consecutiveZeroOrderDays: 3,
+  minimumImpressions: 50,
 };
 
 function ensureDirectories(): void {
@@ -183,19 +185,17 @@ export const database: Database.Database = new Database(paths.database);
 database.pragma("journal_mode = WAL");
 database.pragma("foreign_keys = ON");
 database.pragma("busy_timeout = 5000");
-database.exec(schema);
-migrateToMultiUser(database, defaultSettings.anomalyThresholds);
-migrateTemuShopProfiles(database);
-migrateTemuLifecycle(database);
-migrateBusinessDataToShops(database, defaultSettings.anomalyThresholds);
-migrateProductManagement(database);
 
-database
-  .prepare(
-    `INSERT OR IGNORE INTO system_settings (key, value_json)
-     VALUES ('anomaly_thresholds', ?)`,
-  )
-  .run(JSON.stringify(defaultSettings.anomalyThresholds));
+export function runDatabaseMigrations(): void {
+  database.exec(schema);
+  migrateToMultiUser(database, defaultThresholds);
+  migrateTemuShopProfiles(database);
+  migrateTemuLifecycle(database);
+  ensureShopBusinessSchema(database);
+  migrateBusinessDataToShops(database, defaultThresholds);
+  migrateProductManagement(database);
+  migrateZhihouErp(database);
+}
 
 export function closeDatabase(): void {
   database.close();
