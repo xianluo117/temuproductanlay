@@ -33,6 +33,33 @@ function businessRowCount(database: Database.Database): number {
   }, 0);
 }
 
+function ensureDefaultShopProfile(database: Database.Database): number {
+  const existing = database
+    .prepare("SELECT id FROM temu_shop_profiles ORDER BY id LIMIT 1")
+    .get() as { id: number } | undefined;
+  if (existing) return existing.id;
+
+  const result = database
+    .prepare(
+      `
+      INSERT INTO temu_shop_profiles
+        (name, account_label, profile_key, cdp_port, fingerprint_seed)
+      VALUES (?, ?, ?, ?, ?)
+      `,
+    )
+    .run("默认店铺", "default", "temu/default-shop", 9242, "default-shop");
+  const shopId = Number(result.lastInsertRowid);
+  database
+    .prepare(
+      `
+      INSERT OR IGNORE INTO temu_shop_user_grants (shop_profile_id, user_id)
+      SELECT ?, id FROM users WHERE role = 'admin'
+      `,
+    )
+    .run(shopId);
+  return shopId;
+}
+
 function onlyShopProfileId(database: Database.Database): number {
   const rows = database
     .prepare("SELECT id FROM temu_shop_profiles ORDER BY id")
@@ -163,11 +190,19 @@ export function migrateBusinessDataToShops(
 ): void {
   if (hasColumn(database, "products", "shop_profile_id")) {
     createShopBusinessSchema(database);
+    const shopId = ensureDefaultShopProfile(database);
+    database
+      .prepare(
+        "INSERT OR IGNORE INTO shop_settings (shop_profile_id, key, value_json) VALUES (?, 'anomaly_thresholds', ?)",
+      )
+      .run(shopId, JSON.stringify(defaultThresholds));
     return;
   }
 
   const shopId =
-    businessRowCount(database) === 0 ? null : onlyShopProfileId(database);
+    businessRowCount(database) === 0
+      ? ensureDefaultShopProfile(database)
+      : onlyShopProfileId(database);
   database.pragma("foreign_keys = OFF");
   database.exec(`
     DROP INDEX IF EXISTS idx_import_batches_owner_date;
