@@ -5,6 +5,23 @@ Set-Location $root
 $startedProcesses = New-Object System.Collections.Generic.List[System.Diagnostics.Process]
 $stopRequested = $false
 
+function Invoke-NativeCheck {
+    param([Parameter(Mandatory = $true)][scriptblock]$Command)
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # PowerShell 5.1 会把原生命令写入 stderr 的内容包装为 NativeCommandError。
+        # 依赖探测失败属于预期分支，应通过退出码判断，而不是中断启动脚本。
+        $ErrorActionPreference = 'SilentlyContinue'
+        & $Command *> $null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    return $exitCode
+}
+
 function Stop-ProjectProcesses {
     param([switch]$IncludeServer)
 
@@ -49,17 +66,20 @@ try {
     }
 
     Write-Host '[2/5] Checking Python...'
-    python --version *> $null
-    if ($LASTEXITCODE -ne 0) { throw 'Python was not found. Install Python 3.12 or later and add it to PATH.' }
+    $pythonCheckExitCode = Invoke-NativeCheck { python --version }
+    if ($pythonCheckExitCode -ne 0) { throw 'Python was not found. Install Python 3.12 or later and add it to PATH.' }
 
     Write-Host '[3/5] Checking CloakBrowser...'
-    python -c 'import cloakbrowser' *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $cloakBrowserImportExitCode = Invoke-NativeCheck { python -c 'import cloakbrowser' }
+    if ($cloakBrowserImportExitCode -ne 0) {
+        Write-Host 'CloakBrowser Python package was not found. Installing dependencies...'
         python -m pip install -r apps\browser-worker\requirements.txt
         if ($LASTEXITCODE -ne 0) { throw 'CloakBrowser dependencies installation failed.' }
     }
-    python -c "from cloakbrowser import binary_info; raise SystemExit(0 if binary_info().get('installed') else 1)" *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $cloakBrowserBinaryExitCode = Invoke-NativeCheck {
+        python -c "from cloakbrowser import binary_info; raise SystemExit(0 if binary_info().get('installed') else 1)"
+    }
+    if ($cloakBrowserBinaryExitCode -ne 0) {
         Write-Host 'Installing CloakBrowser binary. The first download may take several minutes...'
         python -m cloakbrowser install
         if ($LASTEXITCODE -ne 0) { throw 'CloakBrowser binary installation failed.' }
