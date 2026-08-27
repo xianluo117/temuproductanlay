@@ -1,0 +1,1527 @@
+// ==UserScript==
+// @name         Temu SPU 调价检测与图片导出
+// @namespace    https://agentseller.temu.com/
+// @version      1.4.1
+// @description  导入商品基础信息，按 SPU 一次查询全部 SKC/尺码的限流调价建议，并嵌入商品图片后导出 Excel。
+// @author       Codex
+// @match        https://agentseller.temu.com/newon/product-select*
+// @run-at       document-idle
+// @require      https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js
+// @require      https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js
+// @grant        GM_xmlhttpRequest
+// @connect      img.kwcdn.com
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const APP_ID = "temu-price-inspector";
+  const ID_QUERY_INPUT_SELECTOR =
+    'input[placeholder="多个查询请空格或逗号依次输入"]';
+  const CODE_QUERY_INPUT_SELECTOR =
+    'input[placeholder="多个货号以空格，逗号分隔"]';
+  const QUERY_TYPE_INPUT_SELECTOR =
+    'input[data-testid="beast-core-select-htmlInput"][readonly]';
+  const TABLE_BODY_SELECTOR =
+    'tbody[data-testid="beast-core-table-middle-tbody"]';
+  const SKC_SELECTOR = '[class*="skc-property-render_skcId"]';
+  const SKU_PRICE_CONTAINER_SELECTOR =
+    '[class*="site-supplier-price_container"]';
+  const MIN_QUERY_WAIT_MS = 2000;
+  const DEFAULT_QUERY_INTERVAL_MS = 2000;
+  const RESULT_TIMEOUT_MS = 15000;
+  const POLL_INTERVAL_MS = 250;
+  const MAX_QUERY_ATTEMPTS = 2;
+  const IMAGE_MAX_ATTEMPTS = 3;
+  const CACHE_BATCH_SPU_COUNT = 50;
+  const CACHE_DB_NAME = "temu-spu-price-inspector-cache";
+  const CACHE_STORE_NAME = "checkpoints";
+
+  const state = {
+    importedRows: [],
+    spuMap: new Map(),
+    skcMap: new Map(),
+    skuMap: new Map(),
+    queue: [],
+    resultsBySkc: new Map(),
+    imageUrlBySpu: new Map(),
+    imageDataBySpu: new Map(),
+    imageFailures: new Set(),
+    failures: new Map(),
+    logs: [],
+    running: false,
+    paused: false,
+    stopped: false,
+    currentIndex: 0,
+    fileName: "",
+    importMode: "spu",
+    queryIntervalMs: DEFAULT_QUERY_INTERVAL_MS,
+    lastQueryAt: 0,
+    cacheKey: "",
+    completedSpus: new Set(),
+    lastCachedSpuCount: 0,
+  };
+
+  const ui = {};
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function openCacheDb() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(CACHE_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(CACHE_STORE_NAME)) {
+          db.createObjectStore(CACHE_STORE_NAME, { keyPath: "key" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () =>
+        reject(request.error || new Error("缓存数据库打开失败"));
+    });
+  }
+
+  async function cacheDbOperation(mode, operation) {
+    const db = await openCacheDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const transaction = db.transaction(CACHE_STORE_NAME, mode);
+        const store = transaction.objectStore(CACHE_STORE_NAME);
+        const request = operation(store);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () =>
+          reject(request.error || new Error("缓存操作失败"));
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  function getCache(key) {
+    return cacheDbOperation("readonly", (store) => store.get(key));
+  }
+
+  function putCache(value) {
+    return cacheDbOperation("readwrite", (store) => store.put(value));
+  }
+
+  async function createFileFingerprint(file, buffer) {
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    const hash = [...new Uint8Array(digest)]
+      .map((value) => value.toString(16).padStart(2, "0"))
+      .join("");
+    return `${file.name}:${file.size}:${hash}`;
+  }
+
+  function normalizeText(value) {
+    return String(value ?? "")
+      .replace(/\u00a0/g, " ")
+      .trim();
+  }
+
+  function normalizeId(value) {
+    const text = normalizeText(value);
+    return text.endsWith(".0") && /^\d+\.0$/.test(text)
+      ? text.slice(0, -2)
+      : text;
+  }
+
+  function parseNumber(value) {
+    const match = normalizeText(value)
+      .replace(/,/g, "")
+      .match(/-?\d+(?:\.\d+)?/);
+    return match ? Number(match[0]) : null;
+  }
+
+  function roundPrice(value) {
+    return Number(Number(value).toFixed(2));
+  }
+
+  function formatPrice(value) {
+    return Number.isFinite(value) ? value.toFixed(2) : "";
+  }
+
+  function extractSize(row) {
+    const candidates = [row["规格1名称"], row["规格2名称"]].map(normalizeText);
+    const sizeField = candidates.find((value) =>
+      /(?:尺码|尺寸)\s*[：:]/.test(value),
+    );
+    if (sizeField) {
+      return normalizeText(
+        sizeField.replace(/^.*?(?:尺码|尺寸)\s*[：:]\s*/, ""),
+      );
+    }
+    const skuCode = normalizeText(row["SKU货号"]);
+    const suffix = skuCode.match(/-([^-]+)$/);
+    return suffix ? suffix[1].toUpperCase() : "";
+  }
+
+  function normalizeProductCode(value) {
+    return normalizeText(value).replace(/\s+/g, "").toUpperCase();
+  }
+
+  function productCodeMatches(pageCode, importedCode) {
+    const page = normalizeProductCode(pageCode);
+    const imported = normalizeProductCode(importedCode);
+    if (!page || !imported) return false;
+    return (
+      page === imported ||
+      page.startsWith(`${imported}-`) ||
+      imported.startsWith(`${page}-`)
+    );
+  }
+
+  function truncateProductCode(value) {
+    const normalized = normalizeText(value);
+    if (!normalized || normalized === "-") return "";
+    const segments = normalized.split("-").map((segment) => segment.trim());
+    if (!segments[0] || (segments.length >= 2 && !segments[1])) return "";
+    return segments.length >= 2 ? segments.slice(0, 2).join("-") : normalized;
+  }
+
+  function extractCostFromProductCode(...codes) {
+    for (const code of codes) {
+      const normalized = normalizeText(code);
+      if (!normalized || normalized === "-") continue;
+      const firstSegment = normalized.split("-")[0];
+      const match = firstSegment.match(/(\d+(?:\.\d+)?)$/);
+      if (match) return Number(match[1]);
+    }
+    return null;
+  }
+
+  function getSpuCost(spuRecord) {
+    const importedCosts = spuRecord.rows
+      .map((row) => row.cost)
+      .filter(Number.isFinite);
+    const pageCosts = [...spuRecord.recordKeys]
+      .map((recordKey) => state.resultsBySkc.get(recordKey))
+      .filter(Boolean)
+      .flatMap((result) => [
+        extractCostFromProductCode(result.skcCode),
+        ...result.skus.map((item) => extractCostFromProductCode(item.skuCode)),
+      ])
+      .filter(Number.isFinite);
+    const costs = [...new Set([...importedCosts, ...pageCosts])];
+    if (!costs.length) {
+      log(`SPU ${spuRecord.spu} 无法从页面或表格货号提取衣服成本`, "warn");
+      return null;
+    }
+    if (costs.length > 1) {
+      log(
+        `SPU ${spuRecord.spu} 检测到多个成本：${costs.join(", ")}，导出时取最低值`,
+        "warn",
+      );
+    }
+    return Math.min(...costs);
+  }
+
+  function log(message, level = "info") {
+    const now = new Date();
+    const time = now.toLocaleTimeString("zh-CN", { hour12: false });
+    const entry = { time, message, level };
+    state.logs.push(entry);
+    if (state.logs.length > 500) state.logs.shift();
+
+    if (ui.log) {
+      const line = document.createElement("div");
+      line.className = `tpi-log-${level}`;
+      line.textContent = `[${time}] ${message}`;
+      ui.log.appendChild(line);
+      while (ui.log.children.length > 160) ui.log.firstElementChild.remove();
+      ui.log.scrollTop = ui.log.scrollHeight;
+    }
+    console[level === "error" ? "error" : level === "warn" ? "warn" : "log"](
+      `[Temu调价检测] ${message}`,
+    );
+  }
+
+  function setStatus(text) {
+    if (ui.status) ui.status.textContent = text;
+  }
+
+  function updateProgress() {
+    const total = state.queue.length;
+    const completed = state.running
+      ? Math.min(total, state.currentIndex + 1)
+      : Math.min(total, state.currentIndex);
+    const percent = total
+      ? Math.min(100, Math.round((completed / total) * 100))
+      : 0;
+    if (ui.progressBar) ui.progressBar.style.width = `${percent}%`;
+    if (ui.progressText)
+      ui.progressText.textContent = `${completed}/${total}（${percent}%）`;
+    if (ui.exportButton)
+      ui.exportButton.disabled = state.running || !state.importedRows.length;
+    if (ui.retryButton)
+      ui.retryButton.disabled = state.running || !state.failures.size;
+  }
+
+  function setRunningButtons() {
+    if (!ui.startButton) return;
+    ui.startButton.disabled = state.running || !state.queue.length;
+    ui.pauseButton.disabled = !state.running;
+    ui.stopButton.disabled = !state.running;
+    ui.importButton.disabled = state.running;
+    ui.pauseButton.textContent = state.paused ? "继续" : "暂停";
+    updateProgress();
+  }
+
+  function injectStyles() {
+    const style = document.createElement("style");
+    style.textContent = `
+#${APP_ID}{position:fixed;right:18px;top:90px;z-index:2147483646;width:390px;background:#fff;border:1px solid #dcdfe6;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.18);font:13px/1.5 Arial,"Microsoft YaHei",sans-serif;color:#303133;overflow:hidden}
+#${APP_ID} *{box-sizing:border-box}
+#${APP_ID} .tpi-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:#ff6a00;color:#fff;font-weight:700;cursor:move;user-select:none}
+#${APP_ID} .tpi-collapse{border:0;background:rgba(255,255,255,.2);color:#fff;border-radius:4px;width:28px;height:25px;cursor:pointer}
+#${APP_ID} .tpi-body{padding:12px}
+#${APP_ID}.collapsed .tpi-body{display:none}
+#${APP_ID} .tpi-row{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:9px;align-items:center}
+#${APP_ID} button{border:1px solid #dcdfe6;background:#fff;border-radius:5px;padding:6px 10px;cursor:pointer;color:#303133}
+#${APP_ID} .tpi-interval{width:64px;border:1px solid #dcdfe6;border-radius:5px;padding:5px 7px;color:#303133}
+#${APP_ID} .tpi-field-label{display:inline-flex;align-items:center;gap:5px;color:#606266}
+#${APP_ID} button:hover:not(:disabled){border-color:#ff6a00;color:#ff6a00}
+#${APP_ID} button:disabled{cursor:not-allowed;opacity:.45}
+#${APP_ID} .primary{background:#ff6a00;border-color:#ff6a00;color:#fff}
+#${APP_ID} .danger{color:#d93025}
+#${APP_ID} .tpi-file{padding:7px 9px;background:#f5f7fa;border-radius:5px;margin-bottom:9px;word-break:break-all}
+#${APP_ID} .tpi-progress{height:9px;background:#ebeef5;border-radius:9px;overflow:hidden;flex:1;margin-top:5px}
+#${APP_ID} .tpi-progress>i{display:block;width:0;height:100%;background:#67c23a;transition:width .2s}
+#${APP_ID} .tpi-progress-text{min-width:100px;text-align:right}
+#${APP_ID} .tpi-status{font-weight:700;margin-bottom:8px}
+#${APP_ID} .tpi-log{height:190px;overflow:auto;background:#171717;color:#ddd;border-radius:6px;padding:7px;font:12px/1.45 Consolas,"Microsoft YaHei",monospace;white-space:pre-wrap;word-break:break-all}
+#${APP_ID} .tpi-log-warn{color:#ffd166}
+#${APP_ID} .tpi-log-error{color:#ff7777}
+#${APP_ID} .tpi-log-success{color:#74d680}
+#${APP_ID} .tpi-note{color:#909399;font-size:12px;margin-top:8px}
+`;
+    document.head.appendChild(style);
+  }
+
+  function makeDraggable(panel, handle) {
+    let dragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+    handle.addEventListener("mousedown", (event) => {
+      if (event.target.closest("button")) return;
+      dragging = true;
+      const rect = panel.getBoundingClientRect();
+      offsetX = event.clientX - rect.left;
+      offsetY = event.clientY - rect.top;
+      panel.style.right = "auto";
+      event.preventDefault();
+    });
+    document.addEventListener("mousemove", (event) => {
+      if (!dragging) return;
+      const left = Math.max(
+        0,
+        Math.min(
+          window.innerWidth - panel.offsetWidth,
+          event.clientX - offsetX,
+        ),
+      );
+      const top = Math.max(
+        0,
+        Math.min(window.innerHeight - 40, event.clientY - offsetY),
+      );
+      panel.style.left = `${left}px`;
+      panel.style.top = `${top}px`;
+    });
+    document.addEventListener("mouseup", () => {
+      dragging = false;
+    });
+  }
+
+  function createPanel() {
+    if (document.getElementById(APP_ID)) return;
+    injectStyles();
+
+    const panel = document.createElement("section");
+    panel.id = APP_ID;
+    panel.innerHTML = `
+<div class="tpi-head"><span>Temu SPU 调价检测</span><button class="tpi-collapse" title="收起/展开">−</button></div>
+<div class="tpi-body">
+  <input class="tpi-file-input" type="file" accept=".xlsx,.xls,.txt,text/plain" hidden>
+  <div class="tpi-row">
+    <button class="tpi-import primary">导入 Excel/TXT</button>
+    <button class="tpi-start">开始检测</button>
+    <button class="tpi-pause" disabled>暂停</button>
+    <button class="tpi-stop danger" disabled>停止</button>
+  </div>
+  <div class="tpi-row">
+    <button class="tpi-retry" disabled>重试失败项</button>
+    <button class="tpi-export" disabled>导出汇总表</button>
+    <button class="tpi-clear-log">清空日志</button>
+  </div>
+  <div class="tpi-row">
+    <label class="tpi-field-label">查询间隔（秒）<input class="tpi-interval" type="number" min="0" max="60" step="0.5" value="2"></label>
+    <span>顺序：SPU → SKC ID → SKC货号</span>
+  </div>
+  <div class="tpi-file">尚未导入表格</div>
+  <div class="tpi-status">等待导入</div>
+  <div class="tpi-row"><div class="tpi-progress"><i></i></div><span class="tpi-progress-text">0/0（0%）</span></div>
+  <div class="tpi-log"></div>
+  <div class="tpi-note">检测时请保持当前页面打开，不要手动查询。导出图片较多时需等待下载与压缩。</div>
+</div>`;
+    document.body.appendChild(panel);
+
+    ui.panel = panel;
+    ui.fileInput = panel.querySelector(".tpi-file-input");
+    ui.importButton = panel.querySelector(".tpi-import");
+    ui.startButton = panel.querySelector(".tpi-start");
+    ui.pauseButton = panel.querySelector(".tpi-pause");
+    ui.stopButton = panel.querySelector(".tpi-stop");
+    ui.retryButton = panel.querySelector(".tpi-retry");
+    ui.exportButton = panel.querySelector(".tpi-export");
+    ui.fileLabel = panel.querySelector(".tpi-file");
+    ui.intervalInput = panel.querySelector(".tpi-interval");
+    ui.status = panel.querySelector(".tpi-status");
+    ui.progressBar = panel.querySelector(".tpi-progress i");
+    ui.progressText = panel.querySelector(".tpi-progress-text");
+    ui.log = panel.querySelector(".tpi-log");
+
+    panel.querySelector(".tpi-collapse").addEventListener("click", (event) => {
+      panel.classList.toggle("collapsed");
+      event.currentTarget.textContent = panel.classList.contains("collapsed")
+        ? "+"
+        : "−";
+    });
+    panel.querySelector(".tpi-clear-log").addEventListener("click", () => {
+      state.logs = [];
+      ui.log.innerHTML = "";
+    });
+    ui.importButton.addEventListener("click", () => ui.fileInput.click());
+    ui.fileInput.addEventListener("change", handleFileImport);
+    ui.startButton.addEventListener("click", () => runQueue(false));
+    ui.pauseButton.addEventListener("click", togglePause);
+    ui.stopButton.addEventListener("click", stopRun);
+    ui.retryButton.addEventListener("click", retryFailures);
+    ui.exportButton.addEventListener("click", exportWorkbook);
+    ui.intervalInput.addEventListener("change", () => {
+      const seconds = Math.max(
+        0,
+        Math.min(60, Number(ui.intervalInput.value) || 0),
+      );
+      ui.intervalInput.value = String(seconds);
+      state.queryIntervalMs = seconds * 1000;
+      log(`查询间隔已设置为 ${seconds} 秒`);
+    });
+
+    makeDraggable(panel, panel.querySelector(".tpi-head"));
+    log("脚本已加载，请导入 Excel 表格或一行一个 SPU 的 TXT 文档。");
+  }
+
+  async function handleFileImport(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      setStatus("正在读取导入文件...");
+      const buffer = await file.arrayBuffer();
+      const fingerprint = await createFileFingerprint(file, buffer);
+      const isTxt = file.name.toLowerCase().endsWith(".txt");
+      let rows;
+      if (isTxt) {
+        const text = new TextDecoder("utf-8")
+          .decode(buffer)
+          .replace(/^\uFEFF/, "");
+        const spus = [
+          ...new Set(
+            text
+              .split(/\r?\n/)
+              .map((line) => normalizeId(line))
+              .filter(Boolean),
+          ),
+        ];
+        if (!spus.length) throw new Error("TXT 中未读取到有效 SPU");
+        rows = spus.map((spu) => ({ "SPU ID": spu }));
+        log(`TXT 已读取 ${spus.length} 个不重复 SPU`, "success");
+      } else {
+        const workbook = XLSX.read(buffer, { type: "array", cellDates: false });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+      }
+      importRows(rows, file.name, fingerprint);
+      await offerCacheRestore();
+    } catch (error) {
+      log(`导入失败：${error.message}`, "error");
+      setStatus("导入失败");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  function importRows(rows, fileName, fingerprint = "") {
+    const headers = rows.length ? Object.keys(rows[0]) : [];
+    if (!headers.includes("SPU ID")) throw new Error("缺少必需列：SPU ID");
+    const priceColumn = headers.includes("申报价格(CNY)")
+      ? "申报价格(CNY)"
+      : headers.includes("申报价格")
+        ? "申报价格"
+        : "";
+
+    resetData();
+    state.fileName = fileName;
+    state.importMode = "spu";
+    state.cacheKey = fingerprint ? `spu-query-v2:${fingerprint}` : "";
+
+    for (const source of rows) {
+      const spu = normalizeId(source["SPU ID"]);
+      if (!spu) continue;
+      const skc = normalizeId(source["SKC ID"]);
+      const sku = normalizeId(source["SKU ID"]);
+      const skuCode = normalizeText(source["SKU货号"]);
+      const skcCode = normalizeText(source["SKC货号"]);
+      const row = {
+        source,
+        spu,
+        skc,
+        sku,
+        recordKey: "",
+        skuCode,
+        skcCode,
+        size: extractSize(source),
+        declaredPrice: priceColumn ? parseNumber(source[priceColumn]) : null,
+        cost: extractCostFromProductCode(skuCode, skcCode),
+      };
+      state.importedRows.push(row);
+      if (sku) state.skuMap.set(sku, row);
+      if (!state.spuMap.has(spu)) {
+        state.spuMap.set(spu, {
+          key: `spu:${spu}`,
+          spu,
+          mode: "spu",
+          queryValue: spu,
+          rows: [],
+          recordKeys: new Set(),
+        });
+      }
+      state.spuMap.get(spu).rows.push(row);
+    }
+
+    state.queue = [...state.spuMap.values()];
+    ui.fileLabel.textContent = `${fileName}｜SPU查询｜${state.spuMap.size} 个 SPU｜${state.importedRows.length} 行`;
+    setStatus("导入完成，可按 SPU 开始检测");
+    log(
+      `导入完成：${state.spuMap.size} 个 SPU；检测时每个 SPU 仅查询一次并解析其全部 SKC/尺码`,
+      "success",
+    );
+    setRunningButtons();
+  }
+
+  function resetData() {
+    state.importedRows = [];
+    state.spuMap.clear();
+    state.skcMap.clear();
+    state.skuMap.clear();
+    state.queue = [];
+    state.resultsBySkc.clear();
+    state.imageUrlBySpu.clear();
+    state.imageDataBySpu.clear();
+    state.imageFailures.clear();
+    state.failures.clear();
+    state.currentIndex = 0;
+    state.lastQueryAt = 0;
+    state.running = false;
+    state.paused = false;
+    state.stopped = false;
+    state.importMode = "spu";
+    state.cacheKey = "";
+    state.completedSpus.clear();
+    state.lastCachedSpuCount = 0;
+    updateProgress();
+  }
+
+  function serializeCheckpoint() {
+    return {
+      key: state.cacheKey,
+      fileName: state.fileName,
+      savedAt: Date.now(),
+      results: [...state.resultsBySkc.entries()],
+      failures: [...state.failures.entries()].map(([key, value]) => [
+        key,
+        value.error,
+      ]),
+      imageUrls: [...state.imageUrlBySpu.entries()],
+      imageFailures: [...state.imageFailures],
+      completedSpus: [...state.completedSpus],
+    };
+  }
+
+  async function saveCheckpoint(force = false) {
+    if (!state.cacheKey) return;
+    const completedCount = state.completedSpus.size;
+    if (
+      !force &&
+      completedCount - state.lastCachedSpuCount < CACHE_BATCH_SPU_COUNT
+    )
+      return;
+    state.lastCachedSpuCount = completedCount;
+    await putCache(serializeCheckpoint());
+    log(`已异步缓存 ${completedCount} 个 SPU 的检测进度`, "success");
+  }
+
+  async function offerCacheRestore() {
+    if (!state.cacheKey) return;
+    const checkpoint = await getCache(state.cacheKey);
+    if (!checkpoint?.results?.length) return;
+    const savedTime = new Date(checkpoint.savedAt).toLocaleString("zh-CN", {
+      hour12: false,
+    });
+    const shouldRestore = window.confirm(
+      `检测到该文件在 ${savedTime} 保存的缓存，共 ${checkpoint.completedSpus?.length || 0} 个 SPU。是否恢复？`,
+    );
+    if (!shouldRestore) return;
+
+    state.resultsBySkc = new Map(checkpoint.results || []);
+    state.imageUrlBySpu = new Map(checkpoint.imageUrls || []);
+    state.imageFailures = new Set(checkpoint.imageFailures || []);
+    state.completedSpus = new Set(checkpoint.completedSpus || []);
+    state.lastCachedSpuCount = state.completedSpus.size;
+    state.skcMap.clear();
+    for (const [recordKey, result] of state.resultsBySkc) {
+      state.skcMap.set(recordKey, result);
+      state.spuMap.get(result.spu)?.recordKeys.add(recordKey);
+    }
+    state.failures.clear();
+    for (const [key, error] of checkpoint.failures || []) {
+      const entry = [...state.spuMap.values()].find((item) => item.key === key);
+      if (entry) state.failures.set(key, { entry, error });
+    }
+    state.queue = [...state.spuMap.values()].filter(
+      (entry) => !state.completedSpus.has(entry.spu),
+    );
+    state.currentIndex = 0;
+    setStatus(`已恢复缓存，剩余 ${state.queue.length} 个 SPU`);
+    log(
+      `缓存恢复完成：已恢复 ${state.completedSpus.size} 个 SPU、${state.resultsBySkc.size} 个 SKC，剩余 ${state.queue.length} 个 SPU`,
+      "success",
+    );
+    setRunningButtons();
+  }
+
+  function togglePause() {
+    if (!state.running) return;
+    state.paused = !state.paused;
+    ui.pauseButton.textContent = state.paused ? "继续" : "暂停";
+    setStatus(state.paused ? "已暂停" : "检测中...");
+    log(state.paused ? "任务已暂停" : "任务已继续");
+  }
+
+  function stopRun() {
+    if (!state.running) return;
+    state.stopped = true;
+    state.paused = false;
+    setStatus("正在停止...");
+    log("已请求停止，当前查询结束后终止。", "warn");
+  }
+
+  async function waitWhilePaused() {
+    while (state.paused && !state.stopped) await sleep(200);
+  }
+
+  async function retryFailures() {
+    if (!state.failures.size || state.running) return;
+    const failedEntries = [...state.failures.values()].map(
+      (item) => item.entry,
+    );
+    failedEntries.forEach((entry) => state.failures.delete(entry.key));
+    state.queue = failedEntries;
+    state.currentIndex = 0;
+    log(`准备重试 ${failedEntries.length} 个失败 SPU`);
+    await runQueue(true);
+  }
+
+  async function runQueue(isRetry) {
+    if (state.running || !state.queue.length) return;
+    const firstEntry = state.queue[0];
+    const input = findQueryInput(firstEntry?.mode || "spu");
+    if (!input) {
+      log("未找到 SPU 查询输入框，请确认当前页面和筛选区域已加载。", "error");
+      setStatus("未找到查询输入框");
+      return;
+    }
+
+    state.running = true;
+    state.stopped = false;
+    state.paused = false;
+    if (!isRetry) state.currentIndex = 0;
+    setRunningButtons();
+    log(
+      `${isRetry ? "重试" : "检测"}任务开始，共 ${state.queue.length} 个 SPU`,
+    );
+
+    try {
+      for (; state.currentIndex < state.queue.length; state.currentIndex += 1) {
+        await waitWhilePaused();
+        if (state.stopped) break;
+
+        const entry = state.queue[state.currentIndex];
+        setStatus(
+          `检测 SPU：${entry.spu}（${state.currentIndex + 1}/${state.queue.length}）`,
+        );
+        let success = false;
+        let lastError = null;
+
+        for (
+          let attempt = 1;
+          attempt <= MAX_QUERY_ATTEMPTS && !success;
+          attempt += 1
+        ) {
+          try {
+            const results = await queryAndParseEntry(entry);
+            entry.recordKeys.clear();
+            for (const result of results) {
+              const recordKey = result.skc;
+              entry.recordKeys.add(recordKey);
+              state.skcMap.set(recordKey, result);
+              state.resultsBySkc.set(recordKey, result);
+            }
+            state.failures.delete(entry.key);
+            state.completedSpus.add(entry.spu);
+            saveCheckpoint(false).catch((error) =>
+              log(`异步缓存失败：${error.message}`, "warn"),
+            );
+            success = true;
+            const suggestedCount = results.reduce(
+              (count, result) =>
+                count +
+                result.skus.filter((item) =>
+                  Number.isFinite(item.suggestedPrice),
+                ).length,
+              0,
+            );
+            const skuCount = results.reduce(
+              (count, result) => count + result.skus.length,
+              0,
+            );
+            log(
+              `SPU ${entry.spu}：${results.length} 个 SKC，${skuCount} 个尺码，${suggestedCount} 个需调价`,
+              suggestedCount ? "warn" : "success",
+            );
+          } catch (error) {
+            lastError = error;
+            log(
+              `SPU ${entry.spu} 第 ${attempt} 次检测失败：${error.message}`,
+              "warn",
+            );
+            if (attempt < MAX_QUERY_ATTEMPTS) await sleep(1200);
+          }
+        }
+
+        if (!success) {
+          state.failures.set(entry.key, {
+            entry,
+            error: lastError?.message || "未知错误",
+          });
+          state.completedSpus.add(entry.spu);
+          saveCheckpoint(false).catch((error) =>
+            log(`异步缓存失败：${error.message}`, "warn"),
+          );
+          log(`SPU ${entry.spu} 检测失败，已加入失败列表`, "error");
+        }
+        updateProgress();
+      }
+    } finally {
+      const stopped = state.stopped;
+      if (!stopped) state.currentIndex = state.queue.length;
+      updateProgress();
+      await saveCheckpoint(true).catch((error) =>
+        log(`最终缓存失败：${error.message}`, "warn"),
+      );
+      state.running = false;
+      state.paused = false;
+      state.stopped = false;
+      setRunningButtons();
+      setStatus(
+        stopped
+          ? "任务已停止，可继续导出当前结果"
+          : `检测完成：成功 ${state.completedSpus.size - state.failures.size} 个 SPU，失败 ${state.failures.size} 个 SPU`,
+      );
+      log(
+        stopped
+          ? "任务已停止"
+          : `检测完成：成功 ${state.completedSpus.size - state.failures.size} 个 SPU，失败 ${state.failures.size} 个 SPU`,
+        stopped ? "warn" : "success",
+      );
+    }
+  }
+
+  function findQueryInput(mode = "spu") {
+    const selector =
+      mode === "code" ? CODE_QUERY_INPUT_SELECTOR : ID_QUERY_INPUT_SELECTOR;
+    const candidates = [...document.querySelectorAll(selector)];
+    return (
+      candidates.find((element) => element.offsetParent !== null) ||
+      candidates[0] ||
+      null
+    );
+  }
+
+  function findQueryTypeInput(codeInput) {
+    const allTypeInputs = [
+      ...document.querySelectorAll(QUERY_TYPE_INPUT_SELECTOR),
+    ].filter((element) => element.offsetParent !== null);
+    if (!codeInput || !allTypeInputs.length) return allTypeInputs[0] || null;
+    const codeRect = codeInput.getBoundingClientRect();
+    return (
+      allTypeInputs
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            element,
+            distance:
+              Math.abs(rect.top - codeRect.top) +
+              Math.abs(rect.left - codeRect.left),
+          };
+        })
+        .sort((a, b) => a.distance - b.distance)[0]?.element || null
+    );
+  }
+
+  async function ensureQueryType(input, targetType) {
+    const typeInput = findQueryTypeInput(input);
+    if (!typeInput) throw new Error("未找到查询类型下拉框");
+    if (normalizeText(typeInput.value) === targetType) return;
+
+    typeInput.click();
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 3000) {
+      const option = [...document.querySelectorAll('li[role="option"]')].find(
+        (element) =>
+          normalizeText(element.textContent) === targetType &&
+          element.offsetParent !== null,
+      );
+      if (option) {
+        option.click();
+        await sleep(200);
+        if (normalizeText(typeInput.value) !== targetType) {
+          typeInput.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        return;
+      }
+      await sleep(100);
+    }
+    throw new Error(`查询类型下拉框中未找到 ${targetType} 选项`);
+  }
+
+  function findQueryButton(input) {
+    const areas = [
+      input.closest("form"),
+      input.parentElement?.parentElement,
+      input.parentElement?.parentElement?.parentElement,
+      document,
+    ].filter(Boolean);
+    for (const area of areas) {
+      const buttons = [
+        ...area.querySelectorAll(
+          'button, a[role="button"], [data-testid*="button"]',
+        ),
+      ];
+      const button = buttons.find(
+        (element) =>
+          normalizeText(element.textContent) === "查询" &&
+          element.offsetParent !== null,
+      );
+      if (button) return button;
+    }
+    return null;
+  }
+
+  function setReactInputValue(input, value) {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    );
+    descriptor.set.call(input, value);
+    input.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: value,
+      }),
+    );
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  function currentTableSignature() {
+    return [...document.querySelectorAll(TABLE_BODY_SELECTOR)]
+      .map((body) => normalizeText(body.textContent).slice(0, 500))
+      .join("|");
+  }
+
+  async function queryAndParseEntry(entry) {
+    const strategies = [entry];
+    const skcIds = [
+      ...new Set(entry.rows.map((row) => row.skc).filter(Boolean)),
+    ];
+    const skcCodes = [
+      ...new Set(entry.rows.map((row) => row.skcCode).filter(Boolean)),
+    ];
+    skcIds.forEach((skc) =>
+      strategies.push({
+        ...entry,
+        mode: "id",
+        skc,
+        queryValue: skc,
+        rows: entry.rows.filter((row) => row.skc === skc),
+      }),
+    );
+    skcCodes.forEach((skcCode) =>
+      strategies.push({
+        ...entry,
+        mode: "code",
+        skcCode,
+        queryValue: skcCode,
+        rows: entry.rows.filter((row) =>
+          productCodeMatches(row.skcCode, skcCode),
+        ),
+      }),
+    );
+
+    const resultsBySkc = new Map();
+    const errors = [];
+    for (const strategy of strategies) {
+      try {
+        const results = await querySingleStrategy(strategy);
+        results.forEach((result) => resultsBySkc.set(result.skc, result));
+        if (strategy.mode === "spu") return [...resultsBySkc.values()];
+      } catch (error) {
+        errors.push(
+          `${strategy.mode === "spu" ? "SPU" : strategy.mode === "id" ? "SKC ID" : "SKC货号"} ${strategy.queryValue}：${error.message}`,
+        );
+        if (strategy.mode === "spu") {
+          log(`SPU ${entry.spu} 查询失败，按优先级降级为 SKC ID`, "warn");
+        }
+      }
+    }
+    if (resultsBySkc.size) return [...resultsBySkc.values()];
+    throw new Error(errors.join("；") || "所有查询策略均失败");
+  }
+
+  async function querySingleStrategy(entry) {
+    const input = findQueryInput(entry.mode);
+    if (!input) throw new Error("查询输入框不存在");
+    await ensureQueryType(input, entry.mode === "spu" ? "SPU" : "SKC");
+    const button = findQueryButton(input);
+    if (!button) throw new Error("未找到“查询”按钮");
+
+    const previousSignature = currentTableSignature();
+    const elapsedSinceLastQuery = Date.now() - state.lastQueryAt;
+    const intervalRemaining = state.lastQueryAt
+      ? state.queryIntervalMs - elapsedSinceLastQuery
+      : 0;
+    if (intervalRemaining > 0) {
+      setStatus(`等待查询间隔：${(intervalRemaining / 1000).toFixed(1)} 秒`);
+      await sleep(intervalRemaining);
+    }
+    setReactInputValue(input, entry.queryValue);
+    input.focus();
+    button.click();
+    state.lastQueryAt = Date.now();
+
+    const startedAt = Date.now();
+    await sleep(MIN_QUERY_WAIT_MS);
+    while (Date.now() - startedAt < RESULT_TIMEOUT_MS) {
+      if (state.stopped) throw new Error("任务已停止");
+      const body = findBodyForEntry(entry);
+      if (body) {
+        const signature = normalizeText(body.textContent).slice(0, 500);
+        if (signature !== previousSignature || bodyMatchesEntry(body, entry)) {
+          await sleep(250);
+          return parseProductBody(body, entry);
+        }
+      }
+      await sleep(POLL_INTERVAL_MS);
+    }
+    throw new Error("等待产品数据超时或页面无结果");
+  }
+
+  function bodyMatchesEntry(body, entry) {
+    const pageSpu = extractSpu(body);
+    if (entry.mode === "spu") return pageSpu === entry.spu;
+    if (entry.mode === "id") {
+      return [...body.querySelectorAll(SKC_SELECTOR)].some(
+        (element) => normalizeId(element.textContent) === entry.skc,
+      );
+    }
+    if (pageSpu && pageSpu !== entry.spu) return false;
+    return productCodeMatches(extractPageSkcCode(body), entry.skcCode);
+  }
+
+  function findBodyForEntry(entry) {
+    const bodies = [...document.querySelectorAll(TABLE_BODY_SELECTOR)];
+    return bodies.find((body) => bodyMatchesEntry(body, entry)) || null;
+  }
+
+  function extractLabeledValue(root, label) {
+    const text = normalizeText(root.textContent);
+    const match = text.match(new RegExp(`${label}\\s*[：:]\\s*([^\\s]+)`));
+    return match ? normalizeText(match[1]) : "";
+  }
+
+  function extractPageSkcCode(body) {
+    const skcElement = body.querySelector(SKC_SELECTOR);
+    const skcInfoRoot =
+      skcElement?.parentElement?.parentElement ||
+      skcElement?.closest("td") ||
+      body;
+    return extractLabeledValue(skcInfoRoot, "货号");
+  }
+
+  function extractSpu(body) {
+    const nameBlocks = [
+      ...body.querySelectorAll('[class*="product-info_name"]'),
+    ];
+    for (const block of nameBlocks) {
+      const match = normalizeText(block.textContent).match(
+        /SPU\s*[：:]\s*(\d+)/i,
+      );
+      if (match) return match[1];
+    }
+    const match = normalizeText(body.textContent).match(/SPU\s*[：:]\s*(\d+)/i);
+    return match ? match[1] : "";
+  }
+
+  function extractMainImageUrl(body) {
+    const activeThumb = body.querySelector(
+      '[class*="product-info_imageList"] [class*="product-info_active"]',
+    );
+    if (activeThumb) {
+      const background =
+        activeThumb.style.backgroundImage ||
+        getComputedStyle(activeThumb).backgroundImage;
+      const match = background.match(/url\(["']?(.*?)["']?\)/);
+      if (match?.[1]) return match[1].replace(/"/g, "");
+    }
+    const slides = [
+      ...body.querySelectorAll(
+        '[data-testid="beast-core-carousel-sliderWrapper"] > div',
+      ),
+    ];
+    const currentSlide = slides.find((slide) =>
+      /left:\s*0%/.test(slide.getAttribute("style") || ""),
+    );
+    const currentImage = currentSlide?.querySelector("img[src]");
+    if (currentImage?.src) return currentImage.src;
+    return (
+      body.querySelector('[class*="product-info_productItem"] img[src]')?.src ||
+      ""
+    );
+  }
+
+  function parseProductBody(body, entry) {
+    const spu = extractSpu(body) || entry.spu || "";
+    if (spu && entry.spu && spu !== entry.spu) {
+      throw new Error(`页面 SPU ${spu} 与表格 SPU ${entry.spu} 不一致`);
+    }
+    const imageUrl = extractMainImageUrl(body);
+    if (imageUrl && spu && !state.imageUrlBySpu.has(spu))
+      state.imageUrlBySpu.set(spu, imageUrl);
+
+    const tableRows = [
+      ...body.querySelectorAll('tr[data-testid="beast-core-table-body-tr"]'),
+    ];
+    const results = [];
+    let activeResult = null;
+
+    for (const rowElement of tableRows) {
+      const skcElement = rowElement.querySelector(SKC_SELECTOR);
+      if (skcElement) {
+        const actualSkc = normalizeId(skcElement.textContent);
+        const skcInfoRoot =
+          skcElement.parentElement?.parentElement ||
+          skcElement.closest("td") ||
+          rowElement;
+        const skcCode = extractLabeledValue(skcInfoRoot, "货号");
+        const importedRows = entry.rows.filter(
+          (row) =>
+            (row.skc && row.skc === actualSkc) ||
+            (row.skcCode && productCodeMatches(skcCode, row.skcCode)),
+        );
+        activeResult = {
+          key: actualSkc,
+          spu,
+          skc: actualSkc,
+          skcCode,
+          skcDeclaredPrice: parseNumber(
+            extractLabeledValue(skcInfoRoot, "申报价格"),
+          ),
+          imageUrl,
+          skus: [],
+        };
+        results.push(activeResult);
+        if (importedRows.length) {
+          importedRows.forEach((row) => {
+            row.skc = actualSkc;
+            row.recordKey = actualSkc;
+          });
+        }
+      }
+
+      const containers = [
+        ...rowElement.querySelectorAll(SKU_PRICE_CONTAINER_SELECTOR),
+      ];
+      if (activeResult && containers.length) {
+        const skcEntry = {
+          ...entry,
+          skc: activeResult.skc,
+          skcCode: activeResult.skcCode,
+          rows: entry.rows.filter(
+            (row) =>
+              row.skc === activeResult.skc ||
+              (row.skcCode &&
+                productCodeMatches(activeResult.skcCode, row.skcCode)),
+          ),
+        };
+        activeResult.skus.push(
+          ...containers
+            .map((container) => parseSkuContainer(container, skcEntry))
+            .filter(Boolean),
+        );
+      }
+    }
+
+    const validResults = results.filter((result) => result.skus.length);
+    if (!validResults.length) throw new Error("未解析到 SKC 尺码价格数据");
+    return validResults;
+  }
+
+  function parseSkuContainer(container, entry) {
+    const exposureKey = normalizeText(
+      container.getAttribute("data-limit-list-exposure-key"),
+    );
+    const skuFromKey = exposureKey.split("_")[0];
+    const rowElement = container.closest("tr");
+    const sizeElement = rowElement?.querySelector(
+      '[class*="use-columns_skuSpecName"]',
+    );
+    const size = normalizeText(sizeElement?.textContent);
+    const skuCell = sizeElement?.closest("td");
+    const skuCodeRoot =
+      skuCell?.querySelector(
+        '[class*="use-columns_infoItem"][class*="use-columns_light"]',
+      ) || skuCell;
+    const skuCode = extractLabeledValue(skuCodeRoot || rowElement, "货号");
+
+    let importedRow = skuFromKey ? state.skuMap.get(skuFromKey) : null;
+    if (!importedRow) {
+      const skcRows = entry.rows || [];
+      importedRow =
+        skcRows.find(
+          (row) =>
+            row.size && size && row.size.toUpperCase() === size.toUpperCase(),
+        ) ||
+        skcRows.find(
+          (row) =>
+            row.skuCode && skuCode && productCodeMatches(skuCode, row.skuCode),
+        );
+    }
+
+    const priceElement = container.querySelector(
+      '[class*="site-supplier-price_price__"]',
+    );
+    const currentPrice = parseNumber(priceElement?.textContent);
+    const statusElement = container.querySelector(
+      '[class*="site-supplier-price_status"]',
+    );
+    const status = normalizeText(statusElement?.textContent);
+    const adjustmentRoots = [
+      ...container.querySelectorAll(
+        '[class*="site-supplier-price_adjustedPrice"]',
+      ),
+    ];
+    const adjustmentRoot = adjustmentRoots.find(
+      (element) =>
+        !/adjustedPriceTitle/.test(element.className) &&
+        /日常申报价调整为/.test(element.textContent),
+    );
+    let suggestedPrice = null;
+    if (adjustmentRoot) {
+      const dailyBlock = [...adjustmentRoot.querySelectorAll("div")].find(
+        (element) =>
+          /日常申报价调整为/.test(element.textContent) &&
+          element.querySelector('[class*="site-supplier-price_impPrice"]'),
+      );
+      const importantPrice =
+        dailyBlock?.querySelector('[class*="site-supplier-price_impPrice"]') ||
+        adjustmentRoot.querySelector('[class*="site-supplier-price_impPrice"]');
+      suggestedPrice = parseNumber(importantPrice?.textContent);
+
+      if (!Number.isFinite(suggestedPrice)) {
+        const dailyTextMatch = normalizeText(adjustmentRoot.textContent).match(
+          /日常申报价调整为\s*(\d+(?:\.\d+)?)/,
+        );
+        suggestedPrice = dailyTextMatch ? Number(dailyTextMatch[1]) : null;
+      }
+    }
+
+    return {
+      sku: importedRow?.sku || skuFromKey || "",
+      size: importedRow?.size || size,
+      skuCode: importedRow?.skuCode || skuCode,
+      currentPrice: Number.isFinite(currentPrice)
+        ? currentPrice
+        : (importedRow?.declaredPrice ?? null),
+      suggestedPrice: Number.isFinite(suggestedPrice) ? suggestedPrice : null,
+      status,
+      matched: Boolean(importedRow),
+    };
+  }
+
+  function buildSummaryRows() {
+    const output = [];
+    for (const spuRecord of state.spuMap.values()) {
+      const pagePrices = [];
+      const limitedPrices = [];
+      const adjustedSkcs = new Set();
+      const pageSkcCodes = new Set();
+      const pageSkuCodes = new Set();
+      const cost = getSpuCost(spuRecord);
+      let totalSkuCount = 0;
+      let adjustedSkuCount = 0;
+      let completedSkcCount = 0;
+
+      for (const recordKey of spuRecord.recordKeys) {
+        const result = state.resultsBySkc.get(recordKey);
+        if (!result) continue;
+        completedSkcCount += 1;
+        const skcCode = truncateProductCode(result.skcCode);
+        if (skcCode) pageSkcCodes.add(skcCode);
+        result.skus.forEach((item) => {
+          const skuCode = truncateProductCode(item.skuCode);
+          if (skuCode) pageSkuCodes.add(skuCode);
+        });
+        if (Number.isFinite(result.skcDeclaredPrice))
+          pagePrices.push(result.skcDeclaredPrice);
+
+        const suggestedItems = result.skus.filter((item) =>
+          Number.isFinite(item.suggestedPrice),
+        );
+        totalSkuCount += result.skus.length;
+        adjustedSkuCount += suggestedItems.length;
+        if (suggestedItems.length) {
+          adjustedSkcs.add(result.skc);
+          suggestedItems.forEach((item) =>
+            limitedPrices.push(item.suggestedPrice),
+          );
+        }
+        result.skus.forEach((item) => {
+          if (Number.isFinite(item.currentPrice))
+            pagePrices.push(item.currentPrice);
+        });
+      }
+
+      const importedPrices = spuRecord.rows
+        .map((row) => row.declaredPrice)
+        .filter(Number.isFinite);
+      const declaredPrice = Math.min(
+        ...(pagePrices.length ? pagePrices : importedPrices),
+      );
+      const validDeclaredPrice = Number.isFinite(declaredPrice)
+        ? roundPrice(declaredPrice)
+        : null;
+      const importedSkcCodes = new Set(
+        spuRecord.rows
+          .map((row) => truncateProductCode(row.skcCode))
+          .filter(Boolean),
+      );
+      const importedSkuCodes = new Set(
+        spuRecord.rows
+          .map((row) => truncateProductCode(row.skuCode))
+          .filter(Boolean),
+      );
+      const preferredSkcCodes = pageSkcCodes.size
+        ? pageSkcCodes
+        : importedSkcCodes;
+      const preferredSkuCodes = pageSkuCodes.size
+        ? pageSkuCodes
+        : importedSkuCodes;
+      const productCodes = preferredSkcCodes.size
+        ? preferredSkcCodes
+        : preferredSkuCodes;
+      const hasAdjustment = adjustedSkcs.size > 0;
+      const allSkcsCompleted = completedSkcCount === spuRecord.recordKeys.size;
+      const allSkusAdjusted =
+        totalSkuCount > 0 && adjustedSkuCount === totalSkuCount;
+      const allSkcsAdjusted = adjustedSkcs.size === spuRecord.recordKeys.size;
+
+      output.push({
+        spu: spuRecord.spu,
+        productCodes: [...productCodes].join(","),
+        skcs: hasAdjustment ? [...adjustedSkcs].join(",") : "",
+        declaredPrice: validDeclaredPrice,
+        limitedPrice: hasAdjustment
+          ? roundPrice(Math.min(...limitedPrices))
+          : null,
+        cost,
+        scope: hasAdjustment
+          ? allSkcsCompleted && allSkcsAdjusted && allSkusAdjusted
+            ? "整体调价"
+            : "部分调价"
+          : "",
+        imageSpu: spuRecord.spu,
+      });
+    }
+    return output;
+  }
+
+  function gmRequestArrayBuffer(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url,
+        responseType: "arraybuffer",
+        timeout: 20000,
+        onload(response) {
+          if (
+            response.status >= 200 &&
+            response.status < 300 &&
+            response.response
+          )
+            resolve(response.response);
+          else reject(new Error(`HTTP ${response.status}`));
+        },
+        onerror: () => reject(new Error("网络请求失败")),
+        ontimeout: () => reject(new Error("图片请求超时")),
+      });
+    });
+  }
+
+  function blobToCompressedDataUrl(
+    blob,
+    maxWidth = 180,
+    maxHeight = 240,
+    quality = 0.78,
+  ) {
+    return new Promise((resolve, reject) => {
+      const objectUrl = URL.createObjectURL(blob);
+      const image = new Image();
+      image.onload = () => {
+        try {
+          const ratio = Math.min(
+            maxWidth / image.naturalWidth,
+            maxHeight / image.naturalHeight,
+            1,
+          );
+          const width = Math.max(1, Math.round(image.naturalWidth * ratio));
+          const height = Math.max(1, Math.round(image.naturalHeight * ratio));
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext("2d");
+          context.fillStyle = "#ffffff";
+          context.fillRect(0, 0, width, height);
+          context.drawImage(image, 0, 0, width, height);
+          resolve({
+            dataUrl: canvas.toDataURL("image/jpeg", quality),
+            width,
+            height,
+            extension: "jpeg",
+          });
+        } catch (error) {
+          reject(error);
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+      };
+      image.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("浏览器无法解码图片"));
+      };
+      image.src = objectUrl;
+    });
+  }
+
+  async function getSpuImageData(spu, forceRetry = false) {
+    const cached = state.imageDataBySpu.get(spu);
+    if (!forceRetry && cached) return cached;
+    const url = state.imageUrlBySpu.get(spu);
+    if (!url) return null;
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= IMAGE_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const buffer = await gmRequestArrayBuffer(url);
+        const blob = new Blob([buffer]);
+        const imageData = await blobToCompressedDataUrl(blob);
+        state.imageDataBySpu.set(spu, imageData);
+        state.imageFailures.delete(spu);
+        if (attempt > 1)
+          log(`SPU ${spu} 图片第 ${attempt} 次下载成功`, "success");
+        return imageData;
+      } catch (error) {
+        lastError = error;
+        log(
+          `SPU ${spu} 图片第 ${attempt}/${IMAGE_MAX_ATTEMPTS} 次下载失败：${error.message}`,
+          "warn",
+        );
+        if (attempt < IMAGE_MAX_ATTEMPTS) await sleep(800 * attempt);
+      }
+    }
+
+    state.imageFailures.add(spu);
+    state.imageDataBySpu.delete(spu);
+    log(
+      `SPU ${spu} 图片多次下载失败，将在下次导出时继续重试：${lastError?.message || "未知错误"}`,
+      "warn",
+    );
+    return null;
+  }
+
+  async function retryFailedImages() {
+    const failedSpus = [...state.imageFailures];
+    for (let index = 0; index < failedSpus.length; index += 1) {
+      const spu = failedSpus[index];
+      setStatus(`正在重试失败图片：${index + 1}/${failedSpus.length}`);
+      await getSpuImageData(spu, true);
+    }
+  }
+
+  async function exportWorkbook() {
+    if (state.running || !state.importedRows.length) return;
+    try {
+      ui.exportButton.disabled = true;
+      setStatus("正在生成汇总数据...");
+      const summaryRows = buildSummaryRows();
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "Temu SPU 调价检测油猴脚本";
+      workbook.created = new Date();
+      const sheet = workbook.addWorksheet("SPU调价汇总", {
+        views: [{ state: "frozen", ySplit: 1 }],
+        properties: { defaultRowHeight: 22 },
+      });
+
+      sheet.columns = [
+        { header: "商品图片", key: "image", width: 24 },
+        { header: "SPU", key: "spu", width: 18 },
+        { header: "货号", key: "productCodes", width: 36 },
+        { header: "需要调价的SKC", key: "skcs", width: 42 },
+        { header: "申报价格", key: "declaredPrice", width: 14 },
+        { header: "限流价格", key: "limitedPrice", width: 14 },
+        { header: "衣服成本", key: "cost", width: 14 },
+        { header: "调价范围", key: "scope", width: 14 },
+      ];
+
+      const header = sheet.getRow(1);
+      header.height = 26;
+      header.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      header.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFFF6A00" },
+      };
+      header.alignment = { horizontal: "center", vertical: "middle" };
+
+      await retryFailedImages();
+      const uniqueSpus = [...new Set(summaryRows.map((row) => row.imageSpu))];
+      for (let index = 0; index < uniqueSpus.length; index += 1) {
+        const spu = uniqueSpus[index];
+        setStatus(`正在下载商品图片：${index + 1}/${uniqueSpus.length}`);
+        await getSpuImageData(spu);
+      }
+      await saveCheckpoint(true).catch((error) =>
+        log(`图片状态缓存失败：${error.message}`, "warn"),
+      );
+
+      const imageIdBySpu = new Map();
+      for (const [spu, data] of state.imageDataBySpu.entries()) {
+        if (!data) continue;
+        imageIdBySpu.set(
+          spu,
+          workbook.addImage({
+            base64: data.dataUrl,
+            extension: data.extension,
+          }),
+        );
+      }
+
+      summaryRows.forEach((item, index) => {
+        const excelRowNumber = index + 2;
+        const row = sheet.addRow({
+          image: "",
+          spu: item.spu,
+          productCodes: item.productCodes,
+          skcs: item.skcs,
+          declaredPrice: item.declaredPrice,
+          limitedPrice: item.limitedPrice,
+          cost: item.cost,
+          scope: item.scope,
+        });
+        row.height = 112;
+        row.alignment = {
+          vertical: "middle",
+          horizontal: "center",
+          wrapText: true,
+        };
+        row.getCell("spu").numFmt = "@";
+        row.getCell("productCodes").numFmt = "@";
+        row.getCell("skcs").numFmt = "@";
+        row.getCell("declaredPrice").numFmt = "0.00";
+        row.getCell("limitedPrice").numFmt = "0.00";
+        row.getCell("cost").numFmt = "0.00";
+        row.eachCell((cell) => {
+          cell.border = {
+            top: { style: "thin", color: { argb: "FFD9D9D9" } },
+            left: { style: "thin", color: { argb: "FFD9D9D9" } },
+            bottom: { style: "thin", color: { argb: "FFD9D9D9" } },
+            right: { style: "thin", color: { argb: "FFD9D9D9" } },
+          };
+        });
+
+        const imageId = imageIdBySpu.get(item.imageSpu);
+        const data = state.imageDataBySpu.get(item.imageSpu);
+        if (imageId != null && data) {
+          const maxW = 140;
+          const maxH = 105;
+          const ratio = Math.min(maxW / data.width, maxH / data.height, 1);
+          sheet.addImage(imageId, {
+            tl: { col: 0.12, row: excelRowNumber - 1 + 0.08 },
+            ext: {
+              width: Math.round(data.width * ratio),
+              height: Math.round(data.height * ratio),
+            },
+            editAs: "oneCell",
+          });
+        }
+      });
+
+      sheet.autoFilter = { from: "A1", to: "H1" };
+      setStatus("正在写入 Excel 文件...");
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+      anchor.href = url;
+      anchor.download = `Temu_SPU调价汇总_${stamp}.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      setStatus(`导出完成：${summaryRows.length} 行`);
+      log(
+        `Excel 导出完成：${summaryRows.length} 行，${imageIdBySpu.size} 张图片`,
+        "success",
+      );
+    } catch (error) {
+      setStatus("导出失败");
+      log(`导出失败：${error.message}`, "error");
+    } finally {
+      ui.exportButton.disabled = state.running || !state.importedRows.length;
+    }
+  }
+
+  function boot() {
+    if (!document.body) {
+      setTimeout(boot, 300);
+      return;
+    }
+    createPanel();
+  }
+
+  boot();
+})();

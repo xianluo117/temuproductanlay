@@ -242,6 +242,118 @@ export function migrateToMultiUser(
   }
 }
 
+export function migrateTemuLifecycle(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS temu_lifecycle_sync_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shop_profile_id INTEGER NOT NULL,
+      requested_by_user_id INTEGER NOT NULL,
+      page_size INTEGER NOT NULL DEFAULT 50,
+      total_pages INTEGER NOT NULL DEFAULT 0,
+      total_spus INTEGER NOT NULL DEFAULT 0,
+      total_skcs INTEGER NOT NULL DEFAULT 0,
+      total_skus INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'partial')),
+      started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT,
+      error_message TEXT,
+      FOREIGN KEY (shop_profile_id) REFERENCES temu_shop_profiles(id) ON DELETE CASCADE,
+      FOREIGN KEY (requested_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_temu_lifecycle_sync_shop_started
+      ON temu_lifecycle_sync_batches(shop_profile_id, started_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS temu_lifecycle_raw_responses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sync_batch_id INTEGER NOT NULL,
+      shop_profile_id INTEGER NOT NULL,
+      page_number INTEGER NOT NULL,
+      request_json TEXT NOT NULL,
+      http_status INTEGER NOT NULL,
+      error_code INTEGER,
+      response_json TEXT NOT NULL,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(sync_batch_id, page_number),
+      FOREIGN KEY (sync_batch_id) REFERENCES temu_lifecycle_sync_batches(id) ON DELETE CASCADE,
+      FOREIGN KEY (shop_profile_id) REFERENCES temu_shop_profiles(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS temu_lifecycle_spu_current (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shop_profile_id INTEGER NOT NULL,
+      sync_batch_id INTEGER NOT NULL,
+      spu TEXT NOT NULL,
+      product_id TEXT,
+      product_code TEXT,
+      main_image_url TEXT,
+      lowest_review_price REAL,
+      traffic_limit_price REAL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(shop_profile_id, spu),
+      FOREIGN KEY (shop_profile_id) REFERENCES temu_shop_profiles(id) ON DELETE CASCADE,
+      FOREIGN KEY (sync_batch_id) REFERENCES temu_lifecycle_sync_batches(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_temu_lifecycle_spu_code
+      ON temu_lifecycle_spu_current(shop_profile_id, product_code);
+
+    CREATE TABLE IF NOT EXISTS temu_lifecycle_skc_current (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      spu_row_id INTEGER NOT NULL,
+      sync_batch_id INTEGER NOT NULL,
+      skc_id TEXT,
+      skc_code TEXT,
+      attribute_json TEXT,
+      lowest_review_price REAL,
+      traffic_limit_price REAL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(spu_row_id, skc_id, skc_code),
+      FOREIGN KEY (spu_row_id) REFERENCES temu_lifecycle_spu_current(id) ON DELETE CASCADE,
+      FOREIGN KEY (sync_batch_id) REFERENCES temu_lifecycle_sync_batches(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_temu_lifecycle_skc_code
+      ON temu_lifecycle_skc_current(skc_code);
+
+    CREATE TABLE IF NOT EXISTS temu_lifecycle_sku_current (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      skc_row_id INTEGER NOT NULL,
+      sync_batch_id INTEGER NOT NULL,
+      sku_id TEXT,
+      sku_code TEXT,
+      size_name TEXT,
+      specification_json TEXT,
+      lowest_supplier_price REAL,
+      suggested_price REAL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(skc_row_id, sku_id, sku_code),
+      FOREIGN KEY (skc_row_id) REFERENCES temu_lifecycle_skc_current(id) ON DELETE CASCADE,
+      FOREIGN KEY (sync_batch_id) REFERENCES temu_lifecycle_sync_batches(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_temu_lifecycle_sku_code
+      ON temu_lifecycle_sku_current(sku_code);
+  `);
+  if (
+    !hasColumn(database, "temu_lifecycle_spu_current", "lowest_review_price")
+  ) {
+    database.exec(
+      "ALTER TABLE temu_lifecycle_spu_current ADD COLUMN lowest_review_price REAL",
+    );
+  }
+  if (
+    !hasColumn(database, "temu_lifecycle_spu_current", "traffic_limit_price")
+  ) {
+    database.exec(
+      "ALTER TABLE temu_lifecycle_spu_current ADD COLUMN traffic_limit_price REAL",
+    );
+  }
+  if (!hasColumn(database, "temu_lifecycle_spu_current", "main_image_url")) {
+    database.exec(
+      "ALTER TABLE temu_lifecycle_spu_current ADD COLUMN main_image_url TEXT",
+    );
+  }
+}
+
 export function migrateProductManagement(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS product_management_records (
@@ -250,10 +362,12 @@ export function migrateProductManagement(database: Database.Database): void {
       created_by_user_id INTEGER NOT NULL,
       product_code TEXT NOT NULL CHECK (length(trim(product_code)) > 0),
       internal_product_id TEXT,
+      serial_number TEXT,
       note TEXT,
-      weight_kg REAL NOT NULL DEFAULT 0 CHECK (weight_kg >= 0),
+      weight_kg REAL NOT NULL DEFAULT 0.3 CHECK (weight_kg >= 0),
       goods_value REAL CHECK (goods_value IS NULL OR goods_value >= 0),
       image_url TEXT,
+      source_type TEXT NOT NULL DEFAULT 'manual' CHECK (source_type IN ('manual', 'lifecycle')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (shop_profile_id) REFERENCES temu_shop_profiles(id) ON DELETE CASCADE,
@@ -279,6 +393,7 @@ export function migrateProductManagement(database: Database.Database): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       record_id INTEGER NOT NULL,
       spu TEXT,
+      note TEXT,
       initial_review_price REAL CHECK (initial_review_price IS NULL OR initial_review_price >= 0),
       review_price REAL CHECK (review_price IS NULL OR review_price >= 0),
       activity_discount_override REAL CHECK (
@@ -318,14 +433,76 @@ export function migrateProductManagement(database: Database.Database): void {
       ON product_management_bindings(sku_id) WHERE sku_id IS NOT NULL;
   `);
 
+  if (!hasColumn(database, "product_management_records", "source_type")) {
+    database.exec(
+      "ALTER TABLE product_management_records ADD COLUMN source_type TEXT NOT NULL DEFAULT 'manual' CHECK (source_type IN ('manual', 'lifecycle'))",
+    );
+  }
+  if (!hasColumn(database, "product_management_records", "serial_number")) {
+    database.exec(
+      "ALTER TABLE product_management_records ADD COLUMN serial_number TEXT",
+    );
+  }
+
+  database.exec(`
+    UPDATE product_management_records AS record
+    SET source_type = 'lifecycle'
+    WHERE source_type = 'manual'
+      AND created_by_user_id = (
+        SELECT id FROM users
+        WHERE username = 'admin' AND role = 'admin'
+        ORDER BY id LIMIT 1
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM product_management_purchase_links purchase
+        WHERE purchase.record_id = record.id
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM product_management_spu_links link
+        JOIN temu_lifecycle_spu_current lifecycle_spu
+          ON lifecycle_spu.shop_profile_id = record.shop_profile_id
+         AND lifecycle_spu.spu = link.spu
+        WHERE link.record_id = record.id
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM product_management_spu_links link
+        JOIN product_management_bindings binding
+          ON binding.spu_link_id = link.id
+        JOIN temu_lifecycle_spu_current lifecycle_spu
+          ON lifecycle_spu.shop_profile_id = record.shop_profile_id
+         AND lifecycle_spu.spu = link.spu
+        JOIN temu_lifecycle_skc_current lifecycle_skc
+          ON lifecycle_skc.spu_row_id = lifecycle_spu.id
+        LEFT JOIN temu_lifecycle_sku_current lifecycle_sku
+          ON lifecycle_sku.skc_row_id = lifecycle_skc.id
+        WHERE link.record_id = record.id
+          AND (
+            (binding.skc_id IS NOT NULL AND binding.skc_id = lifecycle_skc.skc_id)
+            OR (binding.sku_id IS NOT NULL AND binding.sku_id = lifecycle_sku.sku_id)
+          )
+      );
+  `);
+
   database
     .prepare(
       `INSERT OR IGNORE INTO system_settings (key, value_json)
        VALUES ('product_management_pricing', ?)`,
     )
     .run(
-      JSON.stringify({ shippingCostPerKg: 0, recommendedProfitMargin: 0.55 }),
+      JSON.stringify({
+        shippingCostPerKg: 60,
+        recommendedProfitMargin: 0.55,
+        profitThresholdRate: 0.45,
+      }),
     );
+
+  if (!hasColumn(database, "product_management_spu_links", "note")) {
+    database.exec(
+      "ALTER TABLE product_management_spu_links ADD COLUMN note TEXT",
+    );
+  }
 }
 
 export function migrateTemuShopProfiles(database: Database.Database): void {

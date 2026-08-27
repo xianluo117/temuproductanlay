@@ -5,6 +5,7 @@ import {
   healthCheckTemuBrowser,
   startTemuBrowser,
   stopTemuBrowser,
+  syncTemuLifecycle,
   syncTemuTrafficGoods,
 } from "./browser-process-manager.js";
 import {
@@ -17,8 +18,11 @@ import {
   updateTemuShopProfile,
 } from "./temu-shop-service.js";
 import {
+  createLifecycleSync,
   createTrafficSync,
+  failLifecycleSync,
   failTrafficSync,
+  latestLifecycleSync,
   latestTrafficSync,
 } from "./traffic-sync-service.js";
 
@@ -169,12 +173,49 @@ temuShopAdminRouter.post("/:id/traffic/sync", (request, response, next) => {
   }
 });
 
+temuShopAdminRouter.post("/:id/lifecycle/sync", (request, response, next) => {
+  try {
+    const shopId = idSchema.parse(request.params.id);
+    const authenticated =
+      request as unknown as import("../auth/middleware.js").AuthenticatedRequest;
+    const sync = createLifecycleSync(shopId, authenticated.auth.user.id, 50);
+    try {
+      syncTemuLifecycle(shopId, sync.id);
+    } catch (error) {
+      failLifecycleSync(
+        shopId,
+        sync.id,
+        error instanceof Error ? error.message : "同步启动失败。",
+      );
+      throw error;
+    }
+    response.status(202).json({
+      data: { sync, message: "已发布到站点生命周期同步已开始。" },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 temuShopAdminRouter.get(
   "/:id/traffic/sync/latest",
   (request, response, next) => {
     try {
       response.json({
         data: latestTrafficSync(idSchema.parse(request.params.id)),
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+temuShopAdminRouter.get(
+  "/:id/lifecycle/sync/latest",
+  (request, response, next) => {
+    try {
+      response.json({
+        data: latestLifecycleSync(idSchema.parse(request.params.id)),
       });
     } catch (error) {
       next(error);

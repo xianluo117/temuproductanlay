@@ -15,7 +15,9 @@ import type {
   ProductBatchOperationInput,
   ProductBatchOperationResult,
   ProductDetailResponse,
+  ProductManagementColumnPreferences,
   ProductManagementListResponse,
+  ProductManagementTrafficLimitSkc,
   ProductManagementRecord,
   ProductManagementRecordInput,
   ProductManagementSettings,
@@ -26,6 +28,8 @@ import type {
   SpuComparisonResponse,
   TemuBrowserActionResult,
   TemuBrowserEvent,
+  TemuLifecycleListResponse,
+  TemuLifecycleSyncStatus,
   TemuShopGrantUpdateInput,
   TemuShopProfile,
   TemuShopProfileCreateInput,
@@ -134,13 +138,21 @@ export async function getProducts(
   ).data.data;
 }
 
+export interface ProductManagementSearchParams {
+  spu?: string;
+  skc?: string;
+  sku?: string;
+  productCode?: string;
+}
+
 export async function getProductManagementRecords(
   scope: "mine" | "shop" = "mine",
+  search: ProductManagementSearchParams = {},
 ): Promise<ProductManagementListResponse> {
   return (
     await http.get<ApiResponse<ProductManagementListResponse>>(
       "/product-management",
-      { params: { scope } },
+      { params: { scope, ...search } },
     )
   ).data.data;
 }
@@ -172,6 +184,29 @@ export async function deleteProductManagementRecord(id: number): Promise<void> {
   await http.delete(`/product-management/${id}`);
 }
 
+export async function getProductManagementTrafficLimitSkcs(
+  id: number,
+  spu: string,
+): Promise<ProductManagementTrafficLimitSkc[]> {
+  return (
+    await http.get<ApiResponse<ProductManagementTrafficLimitSkc[]>>(
+      `/product-management/${id}/traffic-limit-skcs`,
+      { params: { spu } },
+    )
+  ).data.data;
+}
+
+export async function saveProductManagementColumnPreferences(
+  input: ProductManagementColumnPreferences,
+): Promise<ProductManagementColumnPreferences> {
+  return (
+    await http.put<ApiResponse<ProductManagementColumnPreferences>>(
+      "/product-management/columns",
+      input,
+    )
+  ).data.data;
+}
+
 export async function saveProductManagementSettings(
   input: Omit<ProductManagementSettings, "updatedAt">,
 ): Promise<ProductManagementSettings> {
@@ -180,6 +215,20 @@ export async function saveProductManagementSettings(
       "/product-management/settings",
       input,
     )
+  ).data.data;
+}
+
+export async function syncTemuLifecycle(): Promise<TemuLifecycleSyncStatus> {
+  return (
+    await http.post<ApiResponse<TemuLifecycleSyncStatus>>(
+      "/temu/lifecycle/sync",
+    )
+  ).data.data;
+}
+
+export async function getTemuLifecycle(): Promise<TemuLifecycleListResponse> {
+  return (
+    await http.get<ApiResponse<TemuLifecycleListResponse>>("/temu/lifecycle")
   ).data.data;
 }
 
@@ -469,12 +518,32 @@ export async function startTemuTrafficSync(
   ).data.data;
 }
 
+export async function startTemuLifecycleSync(
+  id: number,
+): Promise<{ sync: TemuLifecycleSyncStatus; message: string }> {
+  return (
+    await http.post<
+      ApiResponse<{ sync: TemuLifecycleSyncStatus; message: string }>
+    >(`/admin/temu-shops/${id}/lifecycle/sync`)
+  ).data.data;
+}
+
 export async function getLatestTemuTrafficSync(
   id: number,
 ): Promise<TemuTrafficSyncStatus | null> {
   return (
     await http.get<ApiResponse<TemuTrafficSyncStatus | null>>(
       `/admin/temu-shops/${id}/traffic/sync/latest`,
+    )
+  ).data.data;
+}
+
+export async function getLatestTemuLifecycleSync(
+  id: number,
+): Promise<TemuLifecycleSyncStatus | null> {
+  return (
+    await http.get<ApiResponse<TemuLifecycleSyncStatus | null>>(
+      `/admin/temu-shops/${id}/lifecycle/sync/latest`,
     )
   ).data.data;
 }

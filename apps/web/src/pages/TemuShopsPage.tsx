@@ -1,6 +1,7 @@
 import type {
   TemuBrowserEvent,
   TemuBrowserRuntimeStatus,
+  TemuLifecycleSyncStatus,
   TemuShopProfile,
   TemuTrafficSyncStatus,
   UserAccount,
@@ -26,10 +27,12 @@ import {
   createTemuShopProfile,
   deleteTemuShopProfile,
   errorMessage,
+  getLatestTemuLifecycleSync,
   getLatestTemuTrafficSync,
   getTemuBrowserEvents,
   getTemuShopProfiles,
   getUsers,
+  startTemuLifecycleSync,
   startTemuShopBrowser,
   startTemuTrafficSync,
   stopTemuShopBrowser,
@@ -51,6 +54,18 @@ const syncStatusColors: Record<TemuTrafficSyncStatus["status"], string> = {
   running: "processing",
   completed: "success",
   failed: "error",
+};
+const lifecycleStatusColors: Record<TemuLifecycleSyncStatus["status"], string> = {
+  running: "processing",
+  completed: "success",
+  failed: "error",
+  partial: "warning",
+};
+const lifecycleStatusLabels: Record<TemuLifecycleSyncStatus["status"], string> = {
+  running: "同步中",
+  completed: "已完成",
+  failed: "失败",
+  partial: "部分完成",
 };
 const syncStatusLabels: Record<TemuTrafficSyncStatus["status"], string> = {
   running: "同步中",
@@ -74,6 +89,9 @@ export function TemuShopsPage() {
   const [syncStatuses, setSyncStatuses] = useState<
     Record<number, TemuTrafficSyncStatus | null>
   >({});
+  const [lifecycleSyncStatuses, setLifecycleSyncStatuses] = useState<
+    Record<number, TemuLifecycleSyncStatus | null>
+  >({});
   const [editing, setEditing] = useState<TemuShopProfile | null>(null);
   const [open, setOpen] = useState(false);
   const [events, setEvents] = useState<TemuBrowserEvent[]>([]);
@@ -87,19 +105,34 @@ export function TemuShopsPage() {
   const reload = useCallback(async () => {
     const profiles = await getTemuShopProfiles();
     setItems(profiles);
-    const statuses = await Promise.all(
-      profiles.map(async (profile) => {
-        try {
-          return [
-            profile.id,
-            await getLatestTemuTrafficSync(profile.id),
-          ] as const;
-        } catch {
-          return [profile.id, null] as const;
-        }
-      }),
-    );
+    const [statuses, lifecycleStatuses] = await Promise.all([
+      Promise.all(
+        profiles.map(async (profile) => {
+          try {
+            return [
+              profile.id,
+              await getLatestTemuTrafficSync(profile.id),
+            ] as const;
+          } catch {
+            return [profile.id, null] as const;
+          }
+        }),
+      ),
+      Promise.all(
+        profiles.map(async (profile) => {
+          try {
+            return [
+              profile.id,
+              await getLatestTemuLifecycleSync(profile.id),
+            ] as const;
+          } catch {
+            return [profile.id, null] as const;
+          }
+        }),
+      ),
+    ]);
     setSyncStatuses(Object.fromEntries(statuses));
+    setLifecycleSyncStatuses(Object.fromEntries(lifecycleStatuses));
   }, []);
   useEffect(() => {
     if (session?.user.role !== "admin") return;
@@ -177,6 +210,23 @@ export function TemuShopsPage() {
     try {
       const result = await startTemuTrafficSync(profile.id);
       setSyncStatuses((current) => ({
+        ...current,
+        [profile.id]: result.sync,
+      }));
+      messageApi.success(result.message);
+      await reload();
+    } catch (error) {
+      messageApi.error(errorMessage(error));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const syncLifecycle = async (profile: TemuShopProfile) => {
+    setBusyId(profile.id);
+    try {
+      const result = await startTemuLifecycleSync(profile.id);
+      setLifecycleSyncStatuses((current) => ({
         ...current,
         [profile.id]: result.sync,
       }));
@@ -303,9 +353,37 @@ export function TemuShopsPage() {
             },
           },
           {
+            title: "生命周期同步",
+            width: 340,
+            render: (_, record: TemuShopProfile) => {
+              const sync = lifecycleSyncStatuses[record.id];
+              if (!sync) return <Text type="secondary">尚未同步</Text>;
+              return (
+                <Space direction="vertical" size={2}>
+                  <Space wrap>
+                    <Tag color={lifecycleStatusColors[sync.status]}>
+                      {lifecycleStatusLabels[sync.status]}
+                    </Tag>
+                    <Text type="secondary">
+                      {sync.totalPages} 页 / SPU {sync.totalSpus} / SKC {sync.totalSkcs} / SKU {sync.totalSkus}
+                    </Text>
+                  </Space>
+                  <Text type="secondary">
+                    操作人 {sync.requestedByUsername} · {new Date(sync.startedAt).toLocaleString()}
+                  </Text>
+                  {sync.errorMessage && (
+                    <Text type="danger" ellipsis={{ tooltip: sync.errorMessage }} style={{ maxWidth: 310 }}>
+                      {sync.errorMessage}
+                    </Text>
+                  )}
+                </Space>
+              );
+            },
+          },
+          {
             title: "操作",
             fixed: "right",
-            width: 500,
+            width: 620,
             render: (_, record: TemuShopProfile) => (
               <Space wrap>
                 <Button onClick={() => showEdit(record)}>配置</Button>
@@ -350,6 +428,19 @@ export function TemuShopsPage() {
                   onClick={() => void syncTraffic(record)}
                 >
                   同步商品流量
+                </Button>
+                <Button
+                  loading={
+                    busyId === record.id ||
+                    lifecycleSyncStatuses[record.id]?.status === "running"
+                  }
+                  disabled={
+                    record.runtimeStatus !== "READY" ||
+                    lifecycleSyncStatuses[record.id]?.status === "running"
+                  }
+                  onClick={() => void syncLifecycle(record)}
+                >
+                  同步生命周期
                 </Button>
                 <Button
                   danger

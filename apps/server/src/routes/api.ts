@@ -1,4 +1,7 @@
-import type { ImportBatch } from "@temu-analytics/shared";
+import {
+  PRODUCT_MANAGEMENT_COLUMN_KEYS,
+  type ImportBatch,
+} from "@temu-analytics/shared";
 import { Router } from "express";
 import multer from "multer";
 import fs from "node:fs";
@@ -52,10 +55,13 @@ import {
 import {
   createProductManagementRecord,
   deleteProductManagementRecord,
+  getProductManagementColumnPreferences,
   listProductManagementRecords,
+  updateProductManagementColumnPreferences,
   updateProductManagementRecord,
   updateProductManagementSettings,
 } from "../product-management/product-management-service.js";
+import { listProductManagementTrafficLimitSkcs } from "../product-management/product-management-traffic-limit-service.js";
 import {
   createProductOperation,
   createProductOperationsBatch,
@@ -63,6 +69,12 @@ import {
   listProductOperations,
   updateProductOperation,
 } from "../products/operation-service.js";
+import { syncTemuLifecycle } from "../temu-shops/browser-process-manager.js";
+import {
+  createLifecycleSync,
+  latestLifecycleSync,
+  listLifecycleCurrent,
+} from "../temu-shops/traffic-sync-service.js";
 
 export const apiRouter = Router();
 
@@ -211,6 +223,7 @@ const productManagementBindingSchema = z.object({
 });
 const productManagementSpuSchema = z.object({
   spu: nullableText,
+  note: z.string().max(3000).nullable().default(null),
   initialReviewPrice: nullableNumber,
   reviewPrice: nullableNumber,
   activityDiscountOverride: z
@@ -219,29 +232,73 @@ const productManagementSpuSchema = z.object({
     .max(1)
     .nullable()
     .default(null),
-  roas: nullableNumber,
   orderCount: z.number().int().nonnegative().nullable().default(null),
   bindings: z.array(productManagementBindingSchema).max(500).default([]),
 });
 const productManagementRecordSchema = z.object({
   productCode: z.string().trim().min(1).max(200),
-  note: z.string().max(3000).nullable().default(null),
-  weightKg: z.number().finite().nonnegative(),
+  weightKg: z.number().finite().nonnegative().default(0.3),
+  goodsValue: nullableNumber,
   purchaseLinks: z.array(z.string().url().max(2000)).max(30).default([]),
   spuLinks: z.array(productManagementSpuSchema).max(100).default([]),
 });
 
 apiRouter.get("/product-management", (request, response, next) => {
   try {
-    const scope = z
-      .enum(["mine", "shop"])
-      .default("mine")
-      .parse(request.query.scope);
+    const query = z
+      .object({
+        scope: z.enum(["mine", "shop"]).default("mine"),
+        spu: z.string().trim().max(1000).optional(),
+        skc: z.string().trim().max(1000).optional(),
+        sku: z.string().trim().max(1000).optional(),
+        productCode: z.string().trim().max(1000).optional(),
+      })
+      .parse(request.query);
+    const search: {
+      spu?: string;
+      skc?: string;
+      sku?: string;
+      productCode?: string;
+    } = {};
+    if (query.spu) search.spu = query.spu;
+    if (query.skc) search.skc = query.skc;
+    if (query.sku) search.sku = query.sku;
+    if (query.productCode) search.productCode = query.productCode;
+    const result = listProductManagementRecords(
+      activeShopId(request),
+      authenticatedUser(request),
+      query.scope,
+      search,
+    );
+    response.json({ data: result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/product-management/columns", (request, response, next) => {
+  try {
     response.json({
-      data: listProductManagementRecords(
-        activeShopId(request),
-        authenticatedUser(request),
-        scope,
+      data: getProductManagementColumnPreferences(authenticatedUser(request).id),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.put("/product-management/columns", (request, response, next) => {
+  try {
+    const input = z
+      .object({
+        visibleColumns: z
+          .array(z.enum(PRODUCT_MANAGEMENT_COLUMN_KEYS))
+          .max(PRODUCT_MANAGEMENT_COLUMN_KEYS.length),
+      })
+      .parse(request.body);
+    response.json({
+      data: updateProductManagementColumnPreferences(
+        authenticatedUser(request).id,
+        input,
       ),
     });
   } catch (error) {
@@ -278,6 +335,31 @@ apiRouter.put("/product-management/:id", (request, response, next) => {
   }
 });
 
+apiRouter.get(
+  "/product-management/:id/traffic-limit-skcs",
+  (request, response, next) => {
+    try {
+      const recordId = z.coerce
+        .number()
+        .int()
+        .positive()
+        .parse(request.params.id);
+      const query = z.object({ spu: z.string().trim().min(1).max(500) }).parse(
+        request.query,
+      );
+      response.json({
+        data: listProductManagementTrafficLimitSkcs(
+          recordId,
+          activeShopId(request),
+          query.spu,
+        ),
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 apiRouter.delete("/product-management/:id", (request, response, next) => {
   try {
     deleteProductManagementRecord(
@@ -298,8 +380,14 @@ apiRouter.put(
     try {
       const input = z
         .object({
-          shippingCostPerKg: z.number().finite().nonnegative(),
-          recommendedProfitMargin: z.number().finite().min(0).lt(1),
+          shippingCostPerKg: z.number().finite().nonnegative().default(60),
+          recommendedProfitMargin: z
+            .number()
+            .finite()
+            .min(0)
+            .lt(1)
+            .default(0.55),
+          profitThresholdRate: z.number().finite().min(0).lt(1).default(0.45),
         })
         .parse(request.body);
       response.json({ data: updateProductManagementSettings(input) });
@@ -308,6 +396,29 @@ apiRouter.put(
     }
   },
 );
+
+apiRouter.get("/temu/lifecycle", (request, response) => {
+  response.json({ data: listLifecycleCurrent(activeShopId(request)) });
+});
+
+apiRouter.get("/temu/lifecycle/latest", (request, response) => {
+  response.json({ data: latestLifecycleSync(activeShopId(request)) });
+});
+
+apiRouter.post("/temu/lifecycle/sync", (request, response, next) => {
+  try {
+    const shopId = activeShopId(request);
+    const user = authenticatedUser(request);
+    const sync = createLifecycleSync(shopId, user.id, 50);
+    syncTemuLifecycle(shopId, sync.id);
+    response.status(202).json({
+      data: sync,
+      message: "已提交已发布到站点生命周期同步任务。",
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 apiRouter.get("/spu-comparison/candidates", (request, response) => {
   response.json({ data: listSpuComparisonCandidates(activeShopId(request)) });

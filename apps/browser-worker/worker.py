@@ -10,9 +10,10 @@ from typing import Any
 from browser_factory import BrowserSession, close_browser, open_persistent_browser
 from profile_paths import resolve_profile_paths
 from session_health import inspect_session
-from traffic_query import query_all_goods
+from traffic_query import query_all_goods, query_published_lifecycle
 
 TEMU_HOME = "https://agentseller-us.temu.com/main/flux-analysis"
+LIFECYCLE_HOME = "https://agentseller.temu.com/newon/product-select"
 
 
 def emit(event: str, **payload: Any) -> None:
@@ -95,6 +96,36 @@ def run() -> int:
                 except Exception as error:  # noqa: BLE001
                     emit(
                         "traffic_failed",
+                        syncId=command.get("syncId"),
+                        status="ERROR",
+                        message=str(error),
+                    )
+            elif action == "sync_lifecycle":
+                health = inspect_session(session.context, args.mall_id)
+                if health.get("status") != "READY":
+                    emit("lifecycle_failed", syncId=command.get("syncId"), **health)
+                    continue
+                emit("lifecycle_started", syncId=command.get("syncId"))
+                try:
+                    page.goto(LIFECYCLE_HOME, wait_until="domcontentloaded", timeout=120_000)
+                    pages = query_published_lifecycle(
+                        page,
+                        page_size=int(command.get("pageSize", 50)),
+                        progress=lambda item: emit(
+                            "lifecycle_page",
+                            syncId=command.get("syncId"),
+                            **item,
+                        ),
+                    )
+                    emit(
+                        "lifecycle_completed",
+                        syncId=command.get("syncId"),
+                        totalPages=len(pages),
+                        totalItems=sum(len(item["items"]) for item in pages),
+                    )
+                except Exception as error:  # noqa: BLE001
+                    emit(
+                        "lifecycle_failed",
                         syncId=command.get("syncId"),
                         status="ERROR",
                         message=str(error),

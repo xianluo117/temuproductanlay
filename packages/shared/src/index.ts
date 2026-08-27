@@ -371,7 +371,108 @@ export interface TemuTrafficSyncActionResult {
 export interface ProductManagementSettings {
   shippingCostPerKg: number;
   recommendedProfitMargin: number;
+  profitThresholdRate: number;
   updatedAt: string | null;
+}
+
+export interface TemuLifecycleSyncStatus {
+  id: number;
+  shopProfileId: number;
+  requestedByUsername: string;
+  pageSize: number;
+  totalPages: number;
+  totalSpus: number;
+  totalSkcs: number;
+  totalSkus: number;
+  status: "running" | "completed" | "failed" | "partial";
+  startedAt: string;
+  completedAt: string | null;
+  errorMessage: string | null;
+}
+
+export interface TemuLifecycleSku {
+  id: number;
+  skuId: string | null;
+  skuCode: string | null;
+  sizeName: string | null;
+  specificationJson: string | null;
+  lowestSupplierPrice: number | null;
+  trafficLimitPrice: number | null;
+  /** @deprecated 使用 trafficLimitPrice。 */
+  suggestedPrice: number | null;
+}
+
+export interface TemuLifecycleSkc {
+  id: number;
+  skcId: string | null;
+  skcCode: string | null;
+  attributeJson: string | null;
+  lowestSupplierPrice: number | null;
+  /** @deprecated 使用 lowestSupplierPrice。 */
+  lowestReviewPrice: number | null;
+  trafficLimitPrice: number | null;
+  skus: TemuLifecycleSku[];
+}
+
+export interface TemuLifecycleSpu {
+  id: number;
+  spu: string;
+  productId: string | null;
+  productCode: string | null;
+  mainImageUrl: string | null;
+  skcs: TemuLifecycleSkc[];
+  lowestSupplierPrice: number | null;
+  /** @deprecated 使用 lowestSupplierPrice。 */
+  lowestReviewPrice: number | null;
+  trafficLimitPrice: number | null;
+  lastSyncBatchId: number;
+}
+
+export interface TemuLifecycleListResponse {
+  shopProfileId: number;
+  latestSync: TemuLifecycleSyncStatus | null;
+  items: TemuLifecycleSpu[];
+}
+
+export interface ProductLifecycleSkuDetail {
+  skuId: string | null;
+  skuCode: string | null;
+  displayCode: string | null;
+  sizeName: string | null;
+  attributes: string[];
+  lowestSupplierPrice: number | null;
+  trafficLimitPrice: number | null;
+}
+
+export interface ProductLifecycleSkcDetail {
+  skcId: string | null;
+  skcCode: string | null;
+  displayCode: string | null;
+  attributes: string[];
+  lowestSupplierPrice: number | null;
+  trafficLimitPrice: number | null;
+  skus: ProductLifecycleSkuDetail[];
+}
+
+export interface ProductLifecycleSpuDetail {
+  spu: string;
+  lowestSupplierPrice: number | null;
+  trafficLimitPrice: number | null;
+  skcs: ProductLifecycleSkcDetail[];
+}
+
+export interface ProductLifecycleMatch {
+  matchType: "skc" | "sku" | "none";
+  spu: string | null;
+  skcCodes: string[];
+  skuCodes: string[];
+  skcAttributes: string[];
+  skuAttributes: string[];
+  lowestSupplierPrice: number | null;
+  /** @deprecated 使用 lowestSupplierPrice。 */
+  lowestReviewPrice: number | null;
+  trafficLimitPrice: number | null;
+  details: ProductLifecycleSpuDetail[];
 }
 
 export interface ProductManagementBinding {
@@ -382,9 +483,29 @@ export interface ProductManagementBinding {
   skuCode: string | null;
 }
 
+export interface ProductManagementTrafficLimitSku {
+  skuId: string | null;
+  skuCode: string | null;
+  displayCode: string | null;
+  sizeName: string | null;
+  attributes: string[];
+  trafficLimitPrice: number | null;
+}
+
+export interface ProductManagementTrafficLimitSkc {
+  spu: string;
+  skcId: string | null;
+  skcCode: string | null;
+  displayCode: string | null;
+  attributes: string[];
+  trafficLimitPrice: number;
+  skus: ProductManagementTrafficLimitSku[];
+}
+
 export interface ProductManagementSpuLink {
   id: number;
   spu: string | null;
+  note: string | null;
   initialReviewPrice: number | null;
   reviewPrice: number | null;
   reviewProfitMargin: number | null;
@@ -394,6 +515,13 @@ export interface ProductManagementSpuLink {
   activityPrice: number | null;
   trafficPrice: number | null;
   roas: number | null;
+  trafficLimitPrice: number | null;
+  trafficLimitProfitMargin: number | null;
+  trafficLimitSuggestedActivityDiscount: number | null;
+  trafficLimitFinalActivityDiscount: number | null;
+  trafficLimitActivityPrice: number | null;
+  trafficLimitTrafficPrice: number | null;
+  trafficLimitRoas: number | null;
   orderCount: number | null;
   bindings: ProductManagementBinding[];
   createdAt: string;
@@ -407,15 +535,18 @@ export interface ProductManagementRecord {
   createdByUsername: string;
   canEdit: boolean;
   productCode: string;
+  /** @deprecated 旧内部字段，仅为数据库和备份兼容保留，不用于页面展示。 */
   internalProductId: string | null;
-  note: string | null;
+  serialNumber: string | null;
   weightKg: number;
   goodsValue: number | null;
   totalCost: number | null;
+  profitThresholdPrice: number | null;
   recommendedPrice: number | null;
   imageUrl: string | null;
   purchaseLinks: string[];
   spuLinks: ProductManagementSpuLink[];
+  lifecycleMatch: ProductLifecycleMatch;
   createdAt: string;
   updatedAt: string;
 }
@@ -429,25 +560,64 @@ export interface ProductManagementBindingInput {
 
 export interface ProductManagementSpuLinkInput {
   spu: string | null;
+  note: string | null;
   initialReviewPrice: number | null;
   reviewPrice: number | null;
   activityDiscountOverride: number | null;
-  roas: number | null;
   orderCount: number | null;
   bindings: ProductManagementBindingInput[];
 }
 
 export interface ProductManagementRecordInput {
   productCode: string;
-  note: string | null;
   weightKg: number;
+  /** 手工货值；为空时使用货号自动解析值。 */
+  goodsValue: number | null;
   purchaseLinks: string[];
   spuLinks: ProductManagementSpuLinkInput[];
+}
+
+export const PRODUCT_MANAGEMENT_COLUMN_KEYS = [
+  "image",
+  "productCode",
+  "serialNumber",
+  "goodsValue",
+  "totalCost",
+  "profitThresholdPrice",
+  "recommendedPrice",
+  "spu",
+  "spuNote",
+  "initialReviewPrice",
+  "reviewPrice",
+  "reviewProfitMargin",
+  "suggestedActivityDiscount",
+  "finalActivityDiscount",
+  "activityPrice",
+  "trafficPrice",
+  "roas",
+  "trafficLimitPrice",
+  "trafficLimitProfitMargin",
+  "trafficLimitSuggestedActivityDiscount",
+  "trafficLimitFinalActivityDiscount",
+  "trafficLimitActivityPrice",
+  "trafficLimitTrafficPrice",
+  "trafficLimitRoas",
+  "orderCount",
+  "purchaseLinks",
+  "createdBy",
+] as const;
+
+export type ProductManagementColumnKey =
+  (typeof PRODUCT_MANAGEMENT_COLUMN_KEYS)[number];
+
+export interface ProductManagementColumnPreferences {
+  visibleColumns: ProductManagementColumnKey[];
 }
 
 export interface ProductManagementListResponse {
   scope: "mine" | "shop";
   settings: ProductManagementSettings;
+  columnPreferences: ProductManagementColumnPreferences;
   records: ProductManagementRecord[];
 }
 

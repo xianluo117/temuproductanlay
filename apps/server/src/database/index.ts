@@ -4,6 +4,7 @@ import path from "node:path";
 import { paths } from "../config.js";
 import {
   migrateProductManagement,
+  migrateTemuLifecycle,
   migrateTemuShopProfiles,
   migrateToMultiUser,
 } from "./migrations.js";
@@ -185,6 +186,7 @@ database.pragma("busy_timeout = 5000");
 database.exec(schema);
 migrateToMultiUser(database, defaultSettings.anomalyThresholds);
 migrateTemuShopProfiles(database);
+migrateTemuLifecycle(database);
 migrateBusinessDataToShops(database, defaultSettings.anomalyThresholds);
 migrateProductManagement(database);
 

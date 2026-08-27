@@ -13,8 +13,11 @@ import {
   updateTemuShopRuntime,
 } from "./temu-shop-service.js";
 import {
+  completeLifecycleSync,
   completeTrafficSync,
+  failLifecycleSync,
   failTrafficSync,
+  storeLifecyclePage,
   storeTrafficPage,
 } from "./traffic-sync-service.js";
 
@@ -63,7 +66,28 @@ function workerArgs(profile: TemuShopProfile): string[] {
 }
 
 function handleWorkerMessage(shopId: number, message: WorkerMessage): void {
-  if (message.event === "traffic_page" && message.syncId) {
+  if (message.event === "lifecycle_page" && message.syncId) {
+    storeLifecyclePage(shopId, {
+      syncId: message.syncId,
+      pageNumber: message.pageNumber ?? 1,
+      pageSize: message.pageSize ?? 50,
+      total: message.total ?? 0,
+      totalPages: message.totalPages ?? 1,
+      requestBody: message.requestBody ?? {},
+      httpStatus: message.httpStatus ?? 0,
+      durationMs: message.durationMs ?? 0,
+      payload: message.payload ?? {},
+      items: message.items ?? [],
+    });
+  } else if (message.event === "lifecycle_completed" && message.syncId) {
+    completeLifecycleSync(shopId, message.syncId);
+  } else if (message.event === "lifecycle_failed" && message.syncId) {
+    failLifecycleSync(
+      shopId,
+      message.syncId,
+      message.message ?? "生命周期同步失败。",
+    );
+  } else if (message.event === "traffic_page" && message.syncId) {
     storeTrafficPage(shopId, {
       syncId: message.syncId,
       pageNumber: message.pageNumber ?? 1,
@@ -197,6 +221,30 @@ export function startTemuBrowser(shopId: number): TemuShopProfile {
   });
 
   return getTemuShopProfile(shopId);
+}
+
+export function syncTemuLifecycle(shopId: number, syncId: number): void {
+  const managed = workers.get(shopId);
+  if (!managed || managed.process.killed) throw new Error("浏览器实例未运行。");
+  const profile = getTemuShopProfile(shopId);
+  if (profile.runtimeStatus !== "READY")
+    throw new Error("浏览器会话未就绪，请先检查会话。");
+  managed.process.stdin.write(
+    `${JSON.stringify({
+      action: "sync_lifecycle",
+      syncId,
+      pageSize: 50,
+      secondarySelectStatusList: [12],
+      supplierTodoTypeList: [],
+    })}\n`,
+  );
+  addTemuBrowserEvent(
+    shopId,
+    "LIFECYCLE_SYNC_REQUESTED",
+    profile.runtimeStatus,
+    "已发送已发布到站点生命周期同步任务。",
+    { syncId, secondarySelectStatusList: [12] },
+  );
 }
 
 export function syncTemuTrafficGoods(shopId: number, syncId: number): void {

@@ -5,6 +5,8 @@ import time
 from typing import Any
 
 TRAFFIC_LIST_ENDPOINT = "/api/flow/analysis/list"
+LIFECYCLE_LIST_ENDPOINT = "/api/kiana/mms/robin/searchForSemiSupplier"
+PUBLISHED_STATUS = [12]
 
 
 def _page_post(page: Any, path: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -45,7 +47,7 @@ def _page_post(page: Any, path: str, body: dict[str, Any]) -> dict[str, Any]:
 def _result_items(result: Any) -> list[dict[str, Any]]:
     if not isinstance(result, dict):
         return []
-    for key in ("pageItems", "list", "goodsList", "data", "records", "items"):
+    for key in ("dataList", "pageItems", "list", "goodsList", "data", "records", "items"):
         value = result.get(key)
         if isinstance(value, list):
             return [item for item in value if isinstance(item, dict)]
@@ -78,7 +80,6 @@ def query_all_goods(
 
     pages: list[dict[str, Any]] = []
     page_number = 1
-    total = 0
     total_pages = 1
 
     while page_number <= total_pages:
@@ -98,6 +99,73 @@ def query_all_goods(
         if payload.get("success") is not True or payload.get("errorCode") != 1000000:
             raise RuntimeError(
                 f"商品明细接口业务失败：{payload.get('errorCode')} {payload.get('errorMsg')}"
+            )
+
+        result = payload.get("result")
+        items = _result_items(result)
+        total = _total(result, len(items))
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        record = {
+            "pageNumber": page_number,
+            "pageSize": page_size,
+            "total": total,
+            "totalPages": total_pages,
+            "requestBody": request_body,
+            "httpStatus": response.get("httpStatus"),
+            "durationMs": response.get("durationMs"),
+            "mallId": response.get("mallId"),
+            "currentUrl": response.get("currentUrl"),
+            "payload": payload,
+            "items": items,
+        }
+        pages.append(record)
+        if progress is not None:
+            progress(record)
+        page_number += 1
+        if page_number <= total_pages:
+            time.sleep(random.randint(delay_min_ms, delay_max_ms) / 1000)
+
+    return pages
+
+
+def query_published_lifecycle(
+    page: Any,
+    *,
+    page_size: int = 50,
+    delay_min_ms: int = 300,
+    delay_max_ms: int = 1000,
+    progress: Any = None,
+) -> list[dict[str, Any]]:
+    if page_size < 1 or page_size > 100:
+        raise ValueError("生命周期 pageSize 必须在 1 到 100 之间。")
+
+    pages: list[dict[str, Any]] = []
+    page_number = 1
+    total_pages = 1
+    fixed_filter = {
+        "secondarySelectStatusList": PUBLISHED_STATUS.copy(),
+        "supplierTodoTypeList": [],
+    }
+
+    while page_number <= total_pages:
+        request_body = {
+            "pageSize": page_size,
+            "pageNum": page_number,
+            **fixed_filter,
+        }
+        if request_body["secondarySelectStatusList"] != PUBLISHED_STATUS:
+            raise RuntimeError("生命周期同步筛选条件被修改，已停止任务。")
+        response = _page_post(page, LIFECYCLE_LIST_ENDPOINT, request_body)
+        payload = response.get("payload")
+        if response.get("httpStatus") != 200:
+            raise RuntimeError(
+                f"生命周期主列表 HTTP {response.get('httpStatus')}，URL={response.get('currentUrl')}"
+            )
+        if not isinstance(payload, dict):
+            raise RuntimeError("生命周期主列表返回结构无效。")
+        if payload.get("success") is not True or payload.get("errorCode") != 1000000:
+            raise RuntimeError(
+                f"生命周期主列表业务失败：{payload.get('errorCode')} {payload.get('errorMsg')}"
             )
 
         result = payload.get("result")
