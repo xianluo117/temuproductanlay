@@ -62,8 +62,8 @@ export function ZhihouOrdersPage() {
     try {
       setData(
         await getZhihouOrderSummary({
-          search: search.trim() || undefined,
-          matchStatus,
+          ...(search.trim() ? { search: search.trim() } : {}),
+          ...(matchStatus ? { matchStatus } : {}),
         }),
       );
     } catch (error) {
@@ -232,11 +232,14 @@ export function ZhihouOrdersPage() {
               dataIndex: "matchMessage",
               width: 260,
               ellipsis: { showTitle: false },
-              render: (value: string | null) => (
-                <Text title={value ?? undefined} type={value ? "secondary" : undefined}>
-                  {value ?? "-"}
-                </Text>
-              ),
+              render: (value: string | null) =>
+                value ? (
+                  <Text title={value} type="secondary">
+                    {value}
+                  </Text>
+                ) : (
+                  <Text>-</Text>
+                ),
             },
             {
               title: "关联订单",

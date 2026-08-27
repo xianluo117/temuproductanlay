@@ -55,7 +55,7 @@ export function ZhihouAccountPage() {
     setSync(nextSync);
     form.setFieldsValue({
       account: nextAccount?.account ?? "",
-      password: undefined,
+      password: "",
       enabled: nextAccount?.enabled ?? true,
     });
   }, [form]);
