@@ -37,6 +37,13 @@ import type {
   TemuTrafficSyncActionResult,
   TemuTrafficSyncStatus,
   UserAccount,
+  ZhihouAccount,
+  ZhihouAccountInput,
+  ZhihouLoginTestResult,
+  ZhihouOrderReferencesResponse,
+  ZhihouOrderSummaryResponse,
+  ZhihouOrderSyncBatch,
+  ZhihouSkuMatchStatus,
 } from "@temu-analytics/shared";
 import axios from "axios";
 
@@ -554,6 +561,73 @@ export async function getTemuBrowserEvents(
   return (
     await http.get<ApiResponse<TemuBrowserEvent[]>>(
       `/admin/temu-shops/${id}/events`,
+    )
+  ).data.data;
+}
+
+export async function getZhihouAccount(): Promise<ZhihouAccount | null> {
+  return (
+    await http.get<ApiResponse<ZhihouAccount | null>>(
+      "/admin/zhihou-erp/account",
+    )
+  ).data.data;
+}
+
+export async function saveZhihouAccount(
+  input: ZhihouAccountInput,
+): Promise<ZhihouAccount> {
+  return (
+    await http.put<ApiResponse<ZhihouAccount>>(
+      "/admin/zhihou-erp/account",
+      input,
+    )
+  ).data.data;
+}
+
+export async function testZhihouAccount(): Promise<ZhihouLoginTestResult> {
+  return (
+    await http.post<ApiResponse<ZhihouLoginTestResult>>(
+      "/admin/zhihou-erp/account/test",
+    )
+  ).data.data;
+}
+
+export async function getLatestZhihouOrderSync(): Promise<
+  ZhihouOrderSyncBatch | null
+> {
+  return (
+    await http.get<ApiResponse<ZhihouOrderSyncBatch | null>>(
+      "/admin/zhihou-erp/sync/latest",
+    )
+  ).data.data;
+}
+
+export async function syncZhihouPendingOrders(): Promise<ZhihouOrderSyncBatch> {
+  return (
+    await http.post<ApiResponse<ZhihouOrderSyncBatch>>(
+      "/admin/zhihou-erp/sync",
+    )
+  ).data.data;
+}
+
+export async function getZhihouOrderSummary(params: {
+  search?: string;
+  matchStatus?: ZhihouSkuMatchStatus;
+} = {}): Promise<ZhihouOrderSummaryResponse> {
+  return (
+    await http.get<ApiResponse<ZhihouOrderSummaryResponse>>(
+      "/zhihou-orders/summary",
+      { params },
+    )
+  ).data.data;
+}
+
+export async function getZhihouOrderReferences(
+  key: string,
+): Promise<ZhihouOrderReferencesResponse> {
+  return (
+    await http.get<ApiResponse<ZhihouOrderReferencesResponse>>(
+      `/zhihou-orders/summary/${encodeURIComponent(key)}/orders`,
     )
   ).data.data;
 }

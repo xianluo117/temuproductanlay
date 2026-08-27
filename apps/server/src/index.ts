@@ -6,7 +6,7 @@ import { ZodError } from "zod";
 import { requireAuthentication } from "./auth/middleware.js";
 import { authRouter } from "./auth/routes.js";
 import { config } from "./config.js";
-import "./database/index.js";
+import { closeDatabase } from "./database/index.js";
 import {
   startImageTaskProcessor,
   stopImageTaskProcessor,
@@ -17,6 +17,10 @@ import {
   stopAllTemuBrowsers,
 } from "./temu-shops/browser-process-manager.js";
 import { temuShopAdminRouter } from "./temu-shops/routes.js";
+import {
+  zhihouAdminRouter,
+  zhihouOrderRouter,
+} from "./zhihou-erp/routes.js";
 
 const app = express();
 app.disable("x-powered-by");
@@ -27,6 +31,8 @@ app.get("/api/health", (_request, response) => {
 });
 app.use("/api/auth", authRouter);
 app.use("/api/admin/temu-shops", requireAuthentication, temuShopAdminRouter);
+app.use("/api/admin/zhihou-erp", requireAuthentication, zhihouAdminRouter);
+app.use("/api/zhihou-orders", requireAuthentication, zhihouOrderRouter);
 app.use("/api", requireAuthentication, apiRouter);
 
 if (fs.existsSync(config.webDistDirectory)) {
@@ -68,7 +74,10 @@ const server = app.listen(config.port, config.host, () => {
 function shutdown(): void {
   stopImageTaskProcessor();
   stopAllTemuBrowsers();
-  server.close(() => process.exit(0));
+  server.close(() => {
+    closeDatabase();
+    process.exit(0);
+  });
 }
 
 process.on("SIGINT", shutdown);

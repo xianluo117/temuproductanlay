@@ -621,6 +621,118 @@ export interface ProductManagementListResponse {
   records: ProductManagementRecord[];
 }
 
+export type ZhihouAccountTestStatus = "untested" | "success" | "failed";
+export type ZhihouSyncStatus = "running" | "completed" | "failed";
+export type ZhihouSkuMatchStatus = "matched" | "unmatched" | "conflict";
+export type ZhihouSkuMatchType = "sku_id" | "sku_code" | "none";
+
+export interface ZhihouAccount {
+  id: number;
+  account: string;
+  enabled: boolean;
+  hasPassword: boolean;
+  lastTestStatus: ZhihouAccountTestStatus;
+  lastTestedAt: string | null;
+  lastTestError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ZhihouAccountInput {
+  account: string;
+  password?: string | undefined;
+  enabled: boolean;
+}
+
+export interface ZhihouLoginTestResult {
+  success: boolean;
+  account: string;
+  testedAt: string;
+  message: string;
+}
+
+export interface ZhihouOrderSyncBatch {
+  id: number;
+  requestedByUserId: number;
+  requestedByUsername: string;
+  status: ZhihouSyncStatus;
+  pageCount: number;
+  orderCount: number;
+  itemCount: number;
+  startedAt: string;
+  completedAt: string | null;
+  errorMessage: string | null;
+}
+
+/**
+ * 智猴订单和库存响应中的 `spu` 实际承载 SKU。本系统统一命名为
+ * `zhihouSku`，禁止将该值直接当作产品管理的上级 SPU 使用。
+ */
+export interface ZhihouNewOrderItem {
+  id: number;
+  syncBatchId: number;
+  orderNo: string;
+  zhihouSku: string;
+  productName: string | null;
+  color: string | null;
+  size: string | null;
+  quantity: number;
+  specificationImageUrl: string | null;
+  mainImageUrl: string | null;
+  storeName: string | null;
+  countryCode: string | null;
+  submittedAt: string | null;
+}
+
+export interface ZhihouSkuMatchResult {
+  status: ZhihouSkuMatchStatus;
+  matchType: ZhihouSkuMatchType;
+  zhihouSku: string;
+  productManagementRecordId: number | null;
+  shopProfileId: number | null;
+  parentSpu: string | null;
+  productCode: string | null;
+  purchaseLinks: string[];
+  message: string | null;
+}
+
+export interface ZhihouOrderReference {
+  orderNo: string;
+  quantity: number;
+  storeName: string | null;
+  countryCode: string | null;
+  submittedAt: string | null;
+}
+
+export interface ZhihouOrderSummaryRow {
+  key: string;
+  parentSpu: string | null;
+  zhihouSkus: string[];
+  color: string | null;
+  size: string | null;
+  requiredQuantity: number;
+  imageUrl: string | null;
+  purchaseLinks: string[];
+  matchStatus: ZhihouSkuMatchStatus;
+  matchMessage: string | null;
+  orderCount: number;
+  orderNos: string[];
+}
+
+export interface ZhihouOrderSummaryResponse {
+  latestSync: ZhihouOrderSyncBatch | null;
+  rows: ZhihouOrderSummaryRow[];
+  totalRequiredQuantity: number;
+  matchedRowCount: number;
+  unmatchedRowCount: number;
+  conflictRowCount: number;
+}
+
+export interface ZhihouOrderReferencesResponse {
+  summaryKey: string;
+  orders: ZhihouOrderReference[];
+}
+
 export interface ApiResponse<T> {
   data: T;
 }

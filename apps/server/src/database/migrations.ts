@@ -506,6 +506,75 @@ export function migrateProductManagement(database: Database.Database): void {
   }
 }
 
+export function migrateZhihouErp(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS zhihou_erp_accounts (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      account TEXT NOT NULL CHECK (length(trim(account)) > 0),
+      password_ciphertext TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+      last_test_status TEXT NOT NULL DEFAULT 'untested'
+        CHECK (last_test_status IN ('untested', 'success', 'failed')),
+      last_tested_at TEXT,
+      last_test_error TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS zhihou_order_sync_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      requested_by_user_id INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+      page_count INTEGER NOT NULL DEFAULT 0 CHECK (page_count >= 0),
+      order_count INTEGER NOT NULL DEFAULT 0 CHECK (order_count >= 0),
+      item_count INTEGER NOT NULL DEFAULT 0 CHECK (item_count >= 0),
+      started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT,
+      error_message TEXT,
+      FOREIGN KEY (requested_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_zhihou_sync_started
+      ON zhihou_order_sync_batches(started_at DESC, id DESC);
+
+    CREATE TABLE IF NOT EXISTS zhihou_new_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sync_batch_id INTEGER NOT NULL,
+      erp_order_id TEXT,
+      order_no TEXT NOT NULL CHECK (length(trim(order_no)) > 0),
+      store_name TEXT,
+      country_code TEXT,
+      submitted_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(sync_batch_id, order_no),
+      FOREIGN KEY (sync_batch_id) REFERENCES zhihou_order_sync_batches(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_zhihou_orders_batch_order
+      ON zhihou_new_orders(sync_batch_id, order_no);
+
+    CREATE TABLE IF NOT EXISTS zhihou_new_order_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sync_batch_id INTEGER NOT NULL,
+      order_id INTEGER NOT NULL,
+      external_item_key TEXT NOT NULL,
+      zhihou_sku TEXT NOT NULL CHECK (length(trim(zhihou_sku)) > 0),
+      product_name TEXT,
+      color TEXT,
+      size TEXT,
+      quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+      specification_image_url TEXT,
+      main_image_url TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(sync_batch_id, external_item_key),
+      FOREIGN KEY (sync_batch_id) REFERENCES zhihou_order_sync_batches(id) ON DELETE CASCADE,
+      FOREIGN KEY (order_id) REFERENCES zhihou_new_orders(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_zhihou_items_batch_sku
+      ON zhihou_new_order_items(sync_batch_id, zhihou_sku);
+    CREATE INDEX IF NOT EXISTS idx_zhihou_items_order
+      ON zhihou_new_order_items(order_id, id);
+  `);
+}
+
 export function migrateTemuShopProfiles(database: Database.Database): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS temu_shop_profiles (

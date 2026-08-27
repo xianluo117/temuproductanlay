@@ -4,6 +4,8 @@ import {
   CloudServerOutlined,
   DatabaseOutlined,
   HistoryOutlined,
+  KeyOutlined,
+  ShoppingCartOutlined,
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -53,6 +55,8 @@ import { SpuComparisonPage } from "./pages/SpuComparisonPage";
 import { SystemBackupsPage } from "./pages/SystemBackupsPage";
 import { TemuShopsPage } from "./pages/TemuShopsPage";
 import { UsersPage } from "./pages/UsersPage";
+import { ZhihouAccountPage } from "./pages/ZhihouAccountPage";
+import { ZhihouOrdersPage } from "./pages/ZhihouOrdersPage";
 
 const { Header, Sider, Content } = Layout;
 const { Text } = Typography;
@@ -94,6 +98,7 @@ export function App() {
       label: "产品管理",
     },
     { key: "/products", icon: <ProductOutlined />, label: "SPU 数据" },
+    { key: "/orders", icon: <ShoppingCartOutlined />, label: "订单管理" },
     { key: "/spu-comparison", icon: <SwapOutlined />, label: "SPU 对比" },
     {
       key: "/global-operations",
@@ -109,6 +114,11 @@ export function App() {
             key: "/admin/temu-shops",
             icon: <SettingOutlined />,
             label: "管理员后台",
+          },
+          {
+            key: "/admin/zhihou-erp",
+            icon: <KeyOutlined />,
+            label: "智猴账号管理",
           },
           { key: "/users", icon: <TeamOutlined />, label: "用户管理" },
           {
@@ -206,6 +216,7 @@ export function App() {
               />
               <Route path="/products" element={<ProductsPage />} />
               <Route path="/products/:spu" element={<ProductDetailPage />} />
+              <Route path="/orders" element={<ZhihouOrdersPage />} />
               <Route path="/spu-comparison" element={<SpuComparisonPage />} />
               <Route
                 path="/global-operations"
@@ -219,6 +230,16 @@ export function App() {
                 element={
                   session.user.role === "admin" ? (
                     <TemuShopsPage />
+                  ) : (
+                    <Navigate to="/" replace />
+                  )
+                }
+              />
+              <Route
+                path="/admin/zhihou-erp"
+                element={
+                  session.user.role === "admin" ? (
+                    <ZhihouAccountPage />
                   ) : (
                     <Navigate to="/" replace />
                   )

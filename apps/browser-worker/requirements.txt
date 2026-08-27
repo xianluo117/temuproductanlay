@@ -1,1 +1,7 @@
 cloakbrowser[geoip]
+requests
+numpy
+Pillow
+opencv-python-headless
+pytesseract
+ddddocr

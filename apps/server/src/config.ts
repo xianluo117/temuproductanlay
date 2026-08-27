@@ -9,6 +9,7 @@ const workspaceRoot = path.resolve(serverRoot, "../..");
 const configuredDataDirectory = process.env.DATA_DIR;
 const configuredWebDirectory = process.env.WEB_DIST_DIR;
 const configuredBrowserDataDirectory = process.env.BROWSER_DATA_DIR;
+const configuredZhihouWorkerScript = process.env.ZHIHOU_WORKER_SCRIPT;
 
 export const config = {
   host: process.env.HOST ?? "0.0.0.0",
@@ -37,6 +38,16 @@ export const config = {
   browserWorkerScript: process.env.BROWSER_WORKER_SCRIPT
     ? path.resolve(serverRoot, process.env.BROWSER_WORKER_SCRIPT)
     : path.join(workspaceRoot, "apps/browser-worker/worker.py"),
+  zhihouWorkerPython:
+    process.env.ZHIHOU_WORKER_PYTHON ??
+    process.env.BROWSER_WORKER_PYTHON ??
+    "python",
+  zhihouWorkerScript: configuredZhihouWorkerScript
+    ? path.resolve(serverRoot, configuredZhihouWorkerScript)
+    : path.join(workspaceRoot, "apps/browser-worker/zhihou_worker.py"),
+  zhihouCredentialKey: process.env.ZHIHOU_CREDENTIAL_KEY ?? "",
+  zhihouRequestTimeoutMs: Number(process.env.ZHIHOU_REQUEST_TIMEOUT_MS ?? 30_000),
+  zhihouLoginMaxAttempts: Number(process.env.ZHIHOU_LOGIN_MAX_ATTEMPTS ?? 8),
 };
 
 export const paths = {
@@ -52,4 +63,9 @@ export const paths = {
   browserProfiles: path.join(config.browserDataDirectory, "profiles"),
   browserRecords: path.join(config.browserDataDirectory, "records"),
   browserRuntime: path.join(config.browserDataDirectory, "runtime"),
+  zhihouCredentialKey: path.join(
+    config.dataDirectory,
+    "security",
+    "zhihou-credential.key",
+  ),
 };
