@@ -65,6 +65,80 @@ function createProductBinding(sku: string, parentSpu: string): number {
   return recordId;
 }
 
+function createLifecycleSpecification(input: {
+  sku: string;
+  parentSpu: string;
+  color: string | null;
+  size: string | null;
+  siblingSkus?: Array<{ sku: string; size: string }>;
+}): void {
+  const shopId = firstShopId();
+  const batchId = Number(
+    database
+      .prepare(
+        `INSERT INTO temu_lifecycle_sync_batches
+          (shop_profile_id, requested_by_user_id, page_size, status,
+           total_pages, total_spus, total_skcs, total_skus, completed_at)
+         VALUES (?, ?, 50, 'completed', 1, 1, 1, 1, CURRENT_TIMESTAMP)`,
+      )
+      .run(shopId, adminId()).lastInsertRowid,
+  );
+  const spuRowId = Number(
+    database
+      .prepare(
+        `INSERT INTO temu_lifecycle_spu_current
+          (shop_profile_id, sync_batch_id, spu, updated_at)
+         VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
+      )
+      .run(shopId, batchId, input.parentSpu).lastInsertRowid,
+  );
+  const skcRowId = Number(
+    database
+      .prepare(
+        `INSERT INTO temu_lifecycle_skc_current
+          (spu_row_id, sync_batch_id, skc_id, skc_code, attribute_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      )
+      .run(
+        spuRowId,
+        batchId,
+        `SKC-${input.sku}`,
+        `SKC-CODE-${input.sku}`,
+        input.color ? JSON.stringify([{ name: "颜色", value: input.color }]) : null,
+      ).lastInsertRowid,
+  );
+  const insertSku = database.prepare(
+    `INSERT INTO temu_lifecycle_sku_current
+      (skc_row_id, sync_batch_id, sku_id, sku_code, size_name,
+       specification_json, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+  );
+  insertSku.run(
+    skcRowId,
+    batchId,
+    input.sku,
+    `CODE-${input.sku}`,
+    input.size,
+    input.size ? JSON.stringify([{ name: "尺码", value: input.size }]) : null,
+  );
+  for (const sibling of input.siblingSkus ?? []) {
+    insertSku.run(
+      skcRowId,
+      batchId,
+      sibling.sku,
+      `CODE-${input.sku}`,
+      sibling.size,
+      JSON.stringify([{ name: "尺码", value: sibling.size }]),
+    );
+  }
+}
+
+function matrixCells(summary: ReturnType<typeof getZhihouOrderSummary>) {
+  return summary.matrices.flatMap((matrix) =>
+    matrix.colorRows.flatMap((row) => Object.values(row.cells)),
+  );
+}
+
 function createCompletedSync(input: {
   sku: string;
   color: string;
@@ -133,7 +207,9 @@ describe("智猴凭据与新订单汇总", () => {
     const encrypted = encryptZhihouPassword("Secret-123");
     expect(encrypted).not.toContain("Secret-123");
     expect(decryptZhihouPassword(encrypted)).toBe("Secret-123");
-    expect(() => decryptZhihouPassword(`${encrypted.slice(0, -1)}x`)).toThrow(
+    const parts = encrypted.split(".");
+    parts[2] = `${parts[2]![0] === "A" ? "B" : "A"}${parts[2]!.slice(1)}`;
+    expect(() => decryptZhihouPassword(parts.join("."))).toThrow(
       "智猴密码解密失败",
     );
   });
@@ -161,7 +237,9 @@ describe("智猴凭据与新订单汇总", () => {
       quantities: [2, 3],
     });
     const summary = getZhihouOrderSummary();
-    const row = summary.rows.find((item) => item.zhihouSkus.includes(sku));
+    const row = matrixCells(summary).find((item) => item.zhihouSkus.includes(sku));
+    expect(summary.matrices[0]?.requiredQuantity).toBe(5);
+    expect(summary.matrices[0]?.colorRows[0]?.requiredQuantity).toBe(5);
     expect(row).toMatchObject({
       parentSpu: "PARENT-SPU-002",
       color: "黑色",
@@ -175,5 +253,78 @@ describe("智猴凭据与新订单汇总", () => {
     expect(references.orders.reduce((sum, item) => sum + item.quantity, 0)).toBe(
       5,
     );
+  });
+
+  it("生命周期颜色和尺码优先于订单规格", () => {
+    const sku = `LIFECYCLE-SKU-${Date.now()}`;
+    const parentSpu = `PARENT-SPU-LIFECYCLE-${Date.now()}`;
+    createProductBinding(sku, parentSpu);
+    createLifecycleSpecification({ sku, parentSpu, color: "军绿色", size: "XL" });
+    createCompletedSync({
+      sku,
+      color: "订单黑色",
+      size: "订单L",
+      quantities: [4],
+    });
+
+    const summary = getZhihouOrderSummary();
+    const row = matrixCells(summary).find((item) => item.zhihouSkus.includes(sku));
+    expect(row).toMatchObject({
+      color: "军绿色",
+      size: "XL",
+      requiredQuantity: 4,
+      matchStatus: "matched",
+    });
+    expect(summary.matrices[0]?.colorRows[0]).toMatchObject({
+      color: "军绿色",
+      requiredQuantity: 4,
+    });
+    expect(summary.matrices[0]?.sizes).toEqual(["XL"]);
+  });
+
+  it("生命周期规格缺失时使用订单颜色和尺码兜底", () => {
+    const sku = `FALLBACK-SKU-${Date.now()}`;
+    const parentSpu = `PARENT-SPU-FALLBACK-${Date.now()}`;
+    createProductBinding(sku, parentSpu);
+    createLifecycleSpecification({ sku, parentSpu, color: null, size: null });
+    createCompletedSync({
+      sku,
+      color: "订单蓝色",
+      size: "订单M",
+      quantities: [2],
+    });
+
+    const summary = getZhihouOrderSummary();
+    const row = matrixCells(summary).find((item) => item.zhihouSkus.includes(sku));
+    expect(row).toMatchObject({ color: "订单蓝色", size: "订单M", requiredQuantity: 2 });
+  });
+
+  it("SKU ID 唯一命中时不把同一 SKC 的兄弟尺码判定为冲突", () => {
+    const sku = `EXACT-SKU-${Date.now()}`;
+    const parentSpu = `PARENT-SPU-EXACT-${Date.now()}`;
+    createProductBinding(sku, parentSpu);
+    createLifecycleSpecification({
+      sku,
+      parentSpu,
+      color: "土黄色",
+      size: "M",
+      siblingSkus: [
+        { sku: `${sku}-S`, size: "S" },
+        { sku: `${sku}-L`, size: "L" },
+        { sku: `${sku}-XL`, size: "XL" },
+      ],
+    });
+    createCompletedSync({ sku, color: "订单颜色", size: "订单尺码", quantities: [1] });
+
+    const summary = getZhihouOrderSummary();
+    const row = matrixCells(summary).find((item) => item.zhihouSkus.includes(sku));
+    expect(row).toMatchObject({
+      color: "土黄色",
+      size: "M",
+      matchStatus: "matched",
+      requiredQuantity: 1,
+    });
+    expect(summary.conflictRowCount).toBe(0);
+    expect(summary.matrices[0]?.sizes).toEqual(["M"]);
   });
 });

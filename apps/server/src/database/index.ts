@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { paths } from "../config.js";
 import {
+  migrateProductImages,
   migrateProductManagement,
   migrateTemuLifecycle,
   migrateTemuShopProfiles,
@@ -195,6 +196,7 @@ export function runDatabaseMigrations(): void {
   ensureShopBusinessSchema(database);
   migrateProductManagement(database);
   migrateZhihouErp(database);
+  migrateProductImages(database);
 }
 
 export function closeDatabase(): void {

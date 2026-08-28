@@ -31,6 +31,10 @@ async function storeBuffer(
     .prepare('SELECT id, file_name, source_type FROM image_assets WHERE content_hash = ?')
     .get(contentHash) as ImageAssetRow | undefined;
   if (existing) {
+    const existingPath = path.join(paths.images, existing.file_name);
+    await fs.writeFile(existingPath, buffer, { flag: 'wx' }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EEXIST') throw error;
+    });
     return {
       assetId: existing.id,
       publicUrl: `/assets/images/${existing.file_name}`,

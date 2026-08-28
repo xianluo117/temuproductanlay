@@ -19,9 +19,11 @@ import {
   Checkbox,
   Divider,
   Form,
+  Image,
   Input,
   InputNumber,
   Modal,
+  Tooltip,
   Popconfirm,
   Segmented,
   Space,
@@ -35,9 +37,11 @@ import {
   createProductManagementRecord,
   deleteProductManagementRecord,
   errorMessage,
+  getProductManagementRecord,
   getProductManagementRecords,
   getProductManagementTrafficLimitSkcs,
   saveProductManagementColumnPreferences,
+  saveProductManagementPageSize,
   saveProductManagementSettings,
   updateProductManagementRecord,
   type ProductManagementSearchParams,
@@ -164,6 +168,41 @@ interface ProductListRow extends ProductManagementRecord {
   spuLink: ProductManagementSpuLink | null;
 }
 
+function ProductManagementImage({ row }: { row: ProductListRow }) {
+  const localUrl = row.spuLink?.localImageUrl ?? null;
+  const remoteUrl = row.spuLink?.remoteImageUrl ?? null;
+  const [src, setSrc] = useState(localUrl ?? remoteUrl);
+
+  useEffect(() => setSrc(localUrl ?? remoteUrl), [localUrl, remoteUrl]);
+
+  const statusText = {
+    ready: "本地图片",
+    pending: "原图预览 · 等待下载",
+    processing: "原图预览 · 下载中",
+    failed: "原图预览 · 本地下载失败",
+    remote_only: "原图预览",
+    missing: "暂无图片",
+  }[row.spuLink?.imageStatus ?? "missing"];
+
+  if (!src) return <Tooltip title={statusText}><div className="image-placeholder large" /></Tooltip>;
+  return (
+    <Tooltip title={row.spuLink?.imageError ?? statusText}>
+      <Image
+        src={src}
+        width={58}
+        height={58}
+        preview
+        referrerPolicy="no-referrer"
+        style={{ objectFit: "cover" }}
+        fallback="data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='58' height='58'%3E%3Crect width='100%25' height='100%25' fill='%23f0f0f0'/%3E%3Ctext x='50%25' y='52%25' text-anchor='middle' fill='%23999' font-size='10'%3E无图片%3C/text%3E%3C/svg%3E"
+        onError={() => {
+          if (src === localUrl && remoteUrl) setSrc(remoteUrl);
+        }}
+      />
+    </Tooltip>
+  );
+}
+
 export function ProductManagementPage() {
   const { session } = useAuth();
   const initialScope: Scope = session?.user.role === "admin" ? "shop" : "mine";
@@ -176,6 +215,9 @@ export function ProductManagementPage() {
     updatedAt: null,
   });
   const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<20 | 50 | 100 | 200 | null>(null);
+  const [total, setTotal] = useState(0);
   const [visibleColumns, setVisibleColumns] = useState<ProductManagementColumnKey[]>(
     [...PRODUCT_MANAGEMENT_COLUMN_KEYS],
   );
@@ -188,6 +230,7 @@ export function ProductManagementPage() {
   const [appliedSearch, setAppliedSearch] = useState<SearchValues>(emptySearch);
   const [detailRecord, setDetailRecord] =
     useState<ProductManagementRecord | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [editing, setEditing] = useState<ProductManagementRecord | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -198,6 +241,7 @@ export function ProductManagementPage() {
     ProductManagementTrafficLimitSkc[]
   >([]);
   const [trafficLimitLoading, setTrafficLimitLoading] = useState(false);
+  const [imageRefreshTick, setImageRefreshTick] = useState(0);
   const [form] = Form.useForm<ProductManagementRecordInput>();
   const [settingsForm] =
     Form.useForm<Omit<ProductManagementSettings, "updatedAt">>();
@@ -206,11 +250,15 @@ export function ProductManagementPage() {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await getProductManagementRecords(
-        scope,
-        activeSearch(appliedSearch),
-      );
+      const result = await getProductManagementRecords(scope, {
+        ...activeSearch(appliedSearch),
+        page,
+        ...(pageSize ? { pageSize } : {}),
+      });
       setRecords(result.records);
+      setPage(result.page);
+      setPageSize(result.pageSize);
+      setTotal(result.total);
       setSettings(result.settings);
       setVisibleColumns(result.columnPreferences.visibleColumns);
     } catch (error) {
@@ -218,9 +266,23 @@ export function ProductManagementPage() {
     } finally {
       setLoading(false);
     }
-  }, [appliedSearch, messageApi, scope]);
+  }, [appliedSearch, imageRefreshTick, messageApi, page, pageSize, scope]);
 
   useEffect(() => void reload(), [reload]);
+
+  useEffect(() => {
+    const hasActiveImageTasks = records.some((record) =>
+      record.spuLinks.some((link) =>
+        link.imageStatus === "pending" || link.imageStatus === "processing",
+      ),
+    );
+    if (!hasActiveImageTasks) return;
+    const timer = window.setTimeout(
+      () => setImageRefreshTick((value) => value + 1),
+      5_000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [records]);
 
   const openCreate = () => {
     setEditing(null);
@@ -272,6 +334,17 @@ export function ProductManagementPage() {
     }
   };
 
+  const openDetail = async (row: ProductListRow) => {
+    setDetailLoading(true);
+    try {
+      setDetailRecord(await getProductManagementRecord(row.id));
+    } catch (error) {
+      messageApi.error(errorMessage(error));
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
   const openTrafficLimitSkcs = async (row: ProductListRow) => {
     const spu = row.spuLink?.spu;
     if (!spu) return;
@@ -319,8 +392,8 @@ export function ProductManagementPage() {
     const allColumns = [
       {
         title: "图片",
-        width: 72,
-        render: () => <div className="image-placeholder large" />,
+        width: 80,
+        render: (_: unknown, row: ProductListRow) => <ProductManagementImage row={row} />,
       },
       { title: "货号", dataIndex: "productCode", width: 180 },
       {
@@ -472,7 +545,11 @@ export function ProductManagementPage() {
         width: 140,
         render: (_: unknown, row: ProductListRow) => (
           <Space wrap>
-            <Button size="small" onClick={() => setDetailRecord(row)}>
+            <Button
+              size="small"
+              loading={detailLoading}
+              onClick={() => void openDetail(row)}
+            >
               详情
             </Button>
             {row.spuLink?.trafficLimitPrice !== null &&
@@ -513,7 +590,7 @@ export function ProductManagementPage() {
       const key = columnOrder[index];
       return key === null || (key !== undefined && visibleColumns.includes(key));
     });
-  }, [reload, visibleColumns]);
+  }, [detailLoading, reload, visibleColumns]);
 
   return (
     <div>
@@ -528,7 +605,10 @@ export function ProductManagementPage() {
         <Space>
           <Segmented
             value={scope}
-            onChange={(value) => setScope(value as Scope)}
+            onChange={(value) => {
+              setPage(1);
+              setScope(value as Scope);
+            }}
             options={[
               { label: "我的数据", value: "mine" },
               { label: "全店数据", value: "shop" },
@@ -583,7 +663,10 @@ export function ProductManagementPage() {
                   spu: event.target.value,
                 }))
               }
-              onPressEnter={() => setAppliedSearch(searchValues)}
+              onPressEnter={() => {
+                setPage(1);
+                setAppliedSearch(searchValues);
+              }}
               placeholder="多个 SPU 使用空格分隔"
               allowClear
               style={{ width: 220, display: "block" }}
@@ -599,7 +682,10 @@ export function ProductManagementPage() {
                   skc: event.target.value,
                 }))
               }
-              onPressEnter={() => setAppliedSearch(searchValues)}
+              onPressEnter={() => {
+                setPage(1);
+                setAppliedSearch(searchValues);
+              }}
               placeholder="多个 SKC 使用空格分隔"
               allowClear
               style={{ width: 220, display: "block" }}
@@ -615,7 +701,10 @@ export function ProductManagementPage() {
                   sku: event.target.value,
                 }))
               }
-              onPressEnter={() => setAppliedSearch(searchValues)}
+              onPressEnter={() => {
+                setPage(1);
+                setAppliedSearch(searchValues);
+              }}
               placeholder="多个 SKU 使用空格分隔"
               allowClear
               style={{ width: 220, display: "block" }}
@@ -631,7 +720,10 @@ export function ProductManagementPage() {
                   productCode: event.target.value,
                 }))
               }
-              onPressEnter={() => setAppliedSearch(searchValues)}
+              onPressEnter={() => {
+                setPage(1);
+                setAppliedSearch(searchValues);
+              }}
               placeholder="多个货号片段使用空格分隔"
               allowClear
               style={{ width: 240, display: "block" }}
@@ -640,12 +732,16 @@ export function ProductManagementPage() {
           <Button
             type="primary"
             icon={<SearchOutlined />}
-            onClick={() => setAppliedSearch(searchValues)}
+            onClick={() => {
+              setPage(1);
+              setAppliedSearch(searchValues);
+            }}
           >
             查询
           </Button>
           <Button
             onClick={() => {
+              setPage(1);
               setSearchValues(emptySearch);
               setAppliedSearch(emptySearch);
             }}
@@ -663,7 +759,26 @@ export function ProductManagementPage() {
           rowKey="rowKey"
           columns={columns}
           dataSource={rows}
-          pagination={{ pageSize: 20, showSizeChanger: true }}
+          pagination={{
+            current: page,
+            pageSize: pageSize ?? 20,
+            total,
+            showSizeChanger: true,
+            pageSizeOptions: [20, 50, 100, 200],
+            showTotal: (value) => `共 ${value} 个产品主档`,
+            onChange: (nextPage, nextPageSize) => {
+              const size = nextPageSize as 20 | 50 | 100 | 200;
+              if (size !== (pageSize ?? 20)) {
+                setPage(1);
+                setPageSize(size);
+                void saveProductManagementPageSize(size).catch((error) =>
+                  messageApi.error(errorMessage(error)),
+                );
+                return;
+              }
+              setPage(nextPage);
+            },
+          }}
           scroll={{ x: 3000 }}
         />
       </Card>

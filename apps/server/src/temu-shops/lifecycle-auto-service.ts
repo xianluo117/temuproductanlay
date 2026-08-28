@@ -1,4 +1,5 @@
 import { database } from "../database/index.js";
+import { queueImageTarget } from "../import/image-association-service.js";
 import { notifyImageTaskProcessor } from "../import/image-task-service.js";
 import {
   productCodeMatchesLifecycle,
@@ -303,7 +304,16 @@ export function autoCreateLifecycleProductRecords(
       const imageUrl = product?.image_asset_id
         ? null
         : product?.remote_image_url ?? row.main_image_url;
-      if (imageUrl) queueImage(shopId, syncId, row.spu, imageUrl);
+      if (imageUrl) {
+        queueImageTarget({
+          url: imageUrl,
+          targetType: "spu",
+          shopId,
+          targetKey: row.spu,
+          sourceType: "lifecycle",
+          priority: 10,
+        });
+      }
     }
   });
   transaction();

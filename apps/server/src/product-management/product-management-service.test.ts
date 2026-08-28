@@ -6,6 +6,7 @@ import { listProductManagementTrafficLimitSkcs } from "./product-management-traf
 import {
   createProductManagementRecord,
   deleteProductManagementRecord,
+  getProductManagementRecord,
   getProductManagementColumnPreferences,
   getProductManagementSettings,
   listProductManagementRecords,
@@ -185,6 +186,16 @@ beforeAll(() => {
   );
 
   autoCreateLifecycleProductRecords(shopId, syncId);
+  database
+    .prepare(
+      `UPDATE products SET remote_image_url = ?
+       WHERE shop_profile_id = ? AND spu = ?`,
+    )
+    .run(
+      `https://img.example.invalid/${suffix}.jpg`,
+      shopId,
+      `SPU-A-${suffix}`,
+    );
 });
 
 afterAll(() => {
@@ -226,9 +237,11 @@ describe("product management lifecycle integration", () => {
   });
 
   it("returns hierarchical lifecycle details with separated prices", () => {
-    const record = listProductManagementRecords(shopId, admin, "shop", {
+    const summary = listProductManagementRecords(shopId, admin, "shop", {
       productCode: "Z38-Y22",
     }).records[0];
+    expect(summary?.lifecycleMatch.details).toEqual([]);
+    const record = getProductManagementRecord(summary!.id, shopId, admin);
     expect(record?.lifecycleMatch).toMatchObject({
       matchType: "skc",
       lowestSupplierPrice: 32,
@@ -318,6 +331,35 @@ describe("product management lifecycle integration", () => {
     );
     database.prepare("DELETE FROM users WHERE id = ?").run(otherUserId);
     updateProductManagementColumnPreferences(admin.id, original);
+  });
+
+  it("paginates by product master records and returns paging metadata", () => {
+    const firstPage = listProductManagementRecords(
+      shopId,
+      admin,
+      "shop",
+      {},
+      { page: 1, pageSize: 20 },
+    );
+    expect(firstPage).toMatchObject({
+      page: 1,
+      pageSize: 20,
+      total: 2,
+      totalPages: 1,
+    });
+    expect(firstPage.records).toHaveLength(2);
+  });
+
+  it("returns remote SPU images while local downloads are incomplete", () => {
+    const record = listProductManagementRecords(shopId, admin, "shop", {
+      spu: `SPU-A-${suffix}`,
+    }).records[0];
+    expect(record?.spuLinks[0]).toMatchObject({
+      localImageUrl: null,
+      remoteImageUrl: `https://img.example.invalid/${suffix}.jpg`,
+      displayImageUrl: `https://img.example.invalid/${suffix}.jpg`,
+      imageStatus: "remote_only",
+    });
   });
 
   it("supports OR keywords within a field and AND across fields", () => {

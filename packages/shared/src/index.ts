@@ -226,6 +226,17 @@ export interface ImageTaskProgress {
   percent: number;
 }
 
+export interface ImageDownloadConcurrencySettings {
+  legacyImportConcurrency: number;
+  globalQueueConcurrency: number;
+  updatedAt: string | null;
+}
+
+export interface ImageDownloadConcurrencySettingsInput {
+  legacyImportConcurrency: number;
+  globalQueueConcurrency: number;
+}
+
 export interface ImportCommitResponse {
   batchId: number;
   dataDate: string;
@@ -407,6 +418,10 @@ export interface TemuLifecycleSkc {
   skcId: string | null;
   skcCode: string | null;
   attributeJson: string | null;
+  /** 生命周期返回的 SKC 规格图 URL。 */
+  imageUrl: string | null;
+  /** 图片下载完成后的本地资产 ID。 */
+  imageAssetId: number | null;
   lowestSupplierPrice: number | null;
   /** @deprecated 使用 lowestSupplierPrice。 */
   lowestReviewPrice: number | null;
@@ -502,10 +517,23 @@ export interface ProductManagementTrafficLimitSkc {
   skus: ProductManagementTrafficLimitSku[];
 }
 
+export type ProductManagementImageStatus =
+  | "ready"
+  | "pending"
+  | "processing"
+  | "failed"
+  | "remote_only"
+  | "missing";
+
 export interface ProductManagementSpuLink {
   id: number;
   spu: string | null;
   note: string | null;
+  localImageUrl: string | null;
+  remoteImageUrl: string | null;
+  displayImageUrl: string | null;
+  imageStatus: ProductManagementImageStatus;
+  imageError: string | null;
   initialReviewPrice: number | null;
   reviewPrice: number | null;
   reviewProfitMargin: number | null;
@@ -614,10 +642,19 @@ export interface ProductManagementColumnPreferences {
   visibleColumns: ProductManagementColumnKey[];
 }
 
+export const PRODUCT_MANAGEMENT_PAGE_SIZES = [20, 50, 100, 200] as const;
+
+export type ProductManagementPageSize =
+  (typeof PRODUCT_MANAGEMENT_PAGE_SIZES)[number];
+
 export interface ProductManagementListResponse {
   scope: "mine" | "shop";
   settings: ProductManagementSettings;
   columnPreferences: ProductManagementColumnPreferences;
+  page: number;
+  pageSize: ProductManagementPageSize;
+  total: number;
+  totalPages: number;
   records: ProductManagementRecord[];
 }
 
@@ -704,12 +741,12 @@ export interface ZhihouOrderReference {
   submittedAt: string | null;
 }
 
-export interface ZhihouOrderSummaryRow {
+export interface ZhihouOrderMatrixCell {
   key: string;
   parentSpu: string | null;
   zhihouSkus: string[];
-  color: string | null;
-  size: string | null;
+  color: string;
+  size: string;
   requiredQuantity: number;
   imageUrl: string | null;
   purchaseLinks: string[];
@@ -719,9 +756,27 @@ export interface ZhihouOrderSummaryRow {
   orderNos: string[];
 }
 
+export interface ZhihouOrderMatrixColorRow {
+  key: string;
+  color: string;
+  imageUrl: string | null;
+  requiredQuantity: number;
+  cells: Record<string, ZhihouOrderMatrixCell>;
+}
+
+export interface ZhihouOrderMatrix {
+  key: string;
+  parentSpu: string | null;
+  fallbackSku: string | null;
+  sizes: string[];
+  colorRows: ZhihouOrderMatrixColorRow[];
+  requiredQuantity: number;
+  matchStatus: ZhihouSkuMatchStatus;
+}
+
 export interface ZhihouOrderSummaryResponse {
   latestSync: ZhihouOrderSyncBatch | null;
-  rows: ZhihouOrderSummaryRow[];
+  matrices: ZhihouOrderMatrix[];
   totalRequiredQuantity: number;
   matchedRowCount: number;
   unmatchedRowCount: number;

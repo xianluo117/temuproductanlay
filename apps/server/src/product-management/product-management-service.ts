@@ -1,9 +1,12 @@
 import {
   PRODUCT_MANAGEMENT_COLUMN_KEYS,
+  PRODUCT_MANAGEMENT_PAGE_SIZES,
   type ProductManagementBinding,
   type ProductManagementColumnKey,
   type ProductManagementColumnPreferences,
+  type ProductManagementImageStatus,
   type ProductManagementListResponse,
+  type ProductManagementPageSize,
   type ProductManagementRecord,
   type ProductManagementRecordInput,
   type ProductManagementSettings,
@@ -11,7 +14,7 @@ import {
   type UserAccount,
 } from "@temu-analytics/shared";
 import { database } from "../database/index.js";
-import { lifecycleMatchForProduct } from "../temu-shops/lifecycle-match-service.js";
+import { lifecycleMatchesForProducts } from "../temu-shops/lifecycle-match-service.js";
 import {
   lifecycleCodeSqlExpression,
   lifecycleProductCodeKey,
@@ -66,6 +69,7 @@ interface BindingRow {
 
 const settingsKey = "product_management_pricing";
 const columnPreferencesKey = "product_management_columns";
+const pageSizePreferenceKey = "product_management_page_size";
 
 export const defaultProductManagementColumns: ProductManagementColumnKey[] = [
   ...PRODUCT_MANAGEMENT_COLUMN_KEYS,
@@ -116,6 +120,39 @@ export function updateProductManagementColumnPreferences(
     )
     .run(userId, columnPreferencesKey, JSON.stringify(preferences));
   return preferences;
+}
+
+export function getProductManagementPageSize(userId: number): ProductManagementPageSize {
+  const row = database
+    .prepare("SELECT value_json FROM user_settings WHERE owner_id = ? AND key = ?")
+    .get(userId, pageSizePreferenceKey) as { value_json: string } | undefined;
+  if (row) {
+    try {
+      const value = Number(JSON.parse(row.value_json));
+      if ((PRODUCT_MANAGEMENT_PAGE_SIZES as readonly number[]).includes(value)) {
+        return value as ProductManagementPageSize;
+      }
+    } catch {
+      // Invalid historical preference falls back to the default.
+    }
+  }
+  return 20;
+}
+
+export function updateProductManagementPageSize(
+  userId: number,
+  pageSize: ProductManagementPageSize,
+): ProductManagementPageSize {
+  database
+    .prepare(
+      `INSERT INTO user_settings (owner_id, key, value_json, updated_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(owner_id, key) DO UPDATE SET
+         value_json = excluded.value_json,
+         updated_at = CURRENT_TIMESTAMP`,
+    )
+    .run(userId, pageSizePreferenceKey, JSON.stringify(pageSize));
+  return pageSize;
 }
 
 function normalizedText(value: string | null | undefined): string | null {
@@ -173,101 +210,208 @@ export function updateProductManagementSettings(input: {
   return getProductManagementSettings();
 }
 
-function bindingsFor(spuLinkId: number): ProductManagementBinding[] {
-  return (
-    database
-      .prepare(
-        `SELECT id, spu_link_id, skc_id, sku_id, skc_code, sku_code
-         FROM product_management_bindings WHERE spu_link_id = ? ORDER BY id`,
-      )
-      .all(spuLinkId) as BindingRow[]
-  ).map((row) => ({
-    id: row.id,
-    skcId: row.skc_id,
-    skuId: row.sku_id,
-    skcCode: row.skc_code,
-    skuCode: row.sku_code,
-  }));
+interface ProductImageRow {
+  spu: string;
+  remote_image_url: string | null;
+  file_name: string | null;
+  task_status: "pending" | "processing" | "completed" | "failed" | null;
+  task_error: string | null;
 }
 
-function trafficLimitPriceForSpu(
-  shopId: number,
-  spu: string | null,
-): number | null {
-  if (!spu) return null;
-  const row = database
+interface ProductImageInfo {
+  localImageUrl: string | null;
+  remoteImageUrl: string | null;
+  displayImageUrl: string | null;
+  imageStatus: ProductManagementImageStatus;
+  imageError: string | null;
+}
+
+interface ProductManagementBatchData {
+  purchaseLinksByRecord: Map<number, string[]>;
+  spuRowsByRecord: Map<number, SpuRow[]>;
+  bindingsBySpuLink: Map<number, ProductManagementBinding[]>;
+  trafficLimitBySpu: Map<string, number>;
+  imageBySpu: Map<string, ProductImageInfo>;
+}
+
+function placeholders(values: readonly unknown[]): string {
+  return values.map(() => "?").join(", ");
+}
+
+function imageInfo(row: ProductImageRow): ProductImageInfo {
+  const localImageUrl = row.file_name
+    ? `/api/images/${encodeURIComponent(row.file_name)}`
+    : null;
+  const remoteImageUrl = normalizedText(row.remote_image_url);
+  let imageStatus: ProductManagementImageStatus = "missing";
+  if (localImageUrl) imageStatus = "ready";
+  else if (row.task_status === "pending") imageStatus = "pending";
+  else if (row.task_status === "processing") imageStatus = "processing";
+  else if (row.task_status === "failed") imageStatus = "failed";
+  else if (remoteImageUrl) imageStatus = "remote_only";
+  return {
+    localImageUrl,
+    remoteImageUrl,
+    displayImageUrl: localImageUrl ?? remoteImageUrl,
+    imageStatus,
+    imageError: row.task_error,
+  };
+}
+
+function loadBatchData(shopId: number, recordIds: number[]): ProductManagementBatchData {
+  const empty: ProductManagementBatchData = {
+    purchaseLinksByRecord: new Map(),
+    spuRowsByRecord: new Map(),
+    bindingsBySpuLink: new Map(),
+    trafficLimitBySpu: new Map(),
+    imageBySpu: new Map(),
+  };
+  if (!recordIds.length) return empty;
+
+  const recordPlaceholders = placeholders(recordIds);
+  const purchaseRows = database
     .prepare(
-      `SELECT MIN(limit_candidates.price) AS minimum_limit_price
-       FROM (
-         SELECT skc.traffic_limit_price AS price
-         FROM temu_lifecycle_skc_current skc
-         JOIN temu_lifecycle_spu_current spu_row
-           ON spu_row.id = skc.spu_row_id
-         WHERE spu_row.shop_profile_id = ? AND spu_row.spu = ?
-           AND skc.traffic_limit_price IS NOT NULL
-         UNION ALL
-         SELECT sku.suggested_price AS price
-         FROM temu_lifecycle_sku_current sku
-         JOIN temu_lifecycle_skc_current skc
-           ON skc.id = sku.skc_row_id
-         JOIN temu_lifecycle_spu_current spu_row
-           ON spu_row.id = skc.spu_row_id
-         WHERE spu_row.shop_profile_id = ? AND spu_row.spu = ?
-           AND sku.suggested_price IS NOT NULL
-       ) AS limit_candidates`,
+      `SELECT record_id, url FROM product_management_purchase_links
+       WHERE record_id IN (${recordPlaceholders}) ORDER BY record_id, sort_order, id`,
     )
-    .get(shopId, spu, shopId, spu) as
-    | { minimum_limit_price: number | null }
-    | undefined;
-  return row?.minimum_limit_price ?? null;
+    .all(...recordIds) as Array<{ record_id: number; url: string }>;
+  for (const row of purchaseRows) {
+    const values = empty.purchaseLinksByRecord.get(row.record_id) ?? [];
+    values.push(row.url);
+    empty.purchaseLinksByRecord.set(row.record_id, values);
+  }
+
+  const spuRows = database
+    .prepare(
+      `SELECT id, record_id, spu, note, initial_review_price, review_price,
+              activity_discount_override, roas, order_count, created_at, updated_at
+       FROM product_management_spu_links
+       WHERE record_id IN (${recordPlaceholders}) ORDER BY record_id, id`,
+    )
+    .all(...recordIds) as SpuRow[];
+  for (const row of spuRows) {
+    const values = empty.spuRowsByRecord.get(row.record_id) ?? [];
+    values.push(row);
+    empty.spuRowsByRecord.set(row.record_id, values);
+  }
+
+  const spuLinkIds = spuRows.map((row) => row.id);
+  if (spuLinkIds.length) {
+    const bindingRows = database
+      .prepare(
+        `SELECT id, spu_link_id, skc_id, sku_id, skc_code, sku_code
+         FROM product_management_bindings
+         WHERE spu_link_id IN (${placeholders(spuLinkIds)}) ORDER BY spu_link_id, id`,
+      )
+      .all(...spuLinkIds) as BindingRow[];
+    for (const row of bindingRows) {
+      const values = empty.bindingsBySpuLink.get(row.spu_link_id) ?? [];
+      values.push({
+        id: row.id,
+        skcId: row.skc_id,
+        skuId: row.sku_id,
+        skcCode: row.skc_code,
+        skuCode: row.sku_code,
+      });
+      empty.bindingsBySpuLink.set(row.spu_link_id, values);
+    }
+  }
+
+  const spus = [...new Set(spuRows.map((row) => row.spu).filter((value): value is string => Boolean(value)))];
+  if (spus.length) {
+    const spuPlaceholders = placeholders(spus);
+    const limitRows = database
+      .prepare(
+        `SELECT spu, MIN(price) AS minimum_limit_price
+         FROM (
+           SELECT spu_row.spu AS spu, skc.traffic_limit_price AS price
+           FROM temu_lifecycle_skc_current skc
+           JOIN temu_lifecycle_spu_current spu_row ON spu_row.id = skc.spu_row_id
+           WHERE spu_row.shop_profile_id = ? AND spu_row.spu IN (${spuPlaceholders})
+             AND skc.traffic_limit_price IS NOT NULL
+           UNION ALL
+           SELECT spu_row.spu AS spu, sku.suggested_price AS price
+           FROM temu_lifecycle_sku_current sku
+           JOIN temu_lifecycle_skc_current skc ON skc.id = sku.skc_row_id
+           JOIN temu_lifecycle_spu_current spu_row ON spu_row.id = skc.spu_row_id
+           WHERE spu_row.shop_profile_id = ? AND spu_row.spu IN (${spuPlaceholders})
+             AND sku.suggested_price IS NOT NULL
+         ) candidates GROUP BY spu`,
+      )
+      .all(shopId, ...spus, shopId, ...spus) as Array<{
+        spu: string;
+        minimum_limit_price: number;
+      }>;
+    limitRows.forEach((row) => empty.trafficLimitBySpu.set(row.spu, row.minimum_limit_price));
+
+    const images = database
+      .prepare(
+        `SELECT p.spu, p.remote_image_url, asset.file_name,
+                COALESCE(global_task.status, legacy_task.status) AS task_status,
+                COALESCE(global_task.last_error, legacy_task.last_error) AS task_error
+         FROM products p
+         LEFT JOIN image_assets asset ON asset.id = p.image_asset_id
+         LEFT JOIN image_download_targets target
+           ON target.target_type = 'spu' AND target.shop_profile_id = p.shop_profile_id
+          AND target.target_key = p.spu
+         LEFT JOIN image_download_tasks global_task ON global_task.id = target.task_id
+         LEFT JOIN remote_image_tasks legacy_task ON legacy_task.id = (
+           SELECT latest.id FROM remote_image_tasks latest
+           WHERE latest.shop_profile_id = p.shop_profile_id AND latest.spu = p.spu
+           ORDER BY latest.id DESC LIMIT 1
+         )
+         WHERE p.shop_profile_id = ? AND p.spu IN (${spuPlaceholders})`,
+      )
+      .all(shopId, ...spus) as ProductImageRow[];
+    images.forEach((row) => empty.imageBySpu.set(row.spu, imageInfo(row)));
+  }
+  return empty;
 }
 
 function spuLinksFor(
-  shopId: number,
-  recordId: number,
-  goodsValue: number | null,
-  weightKg: number,
+  row: RecordRow,
   settings: ProductManagementSettings,
+  batch: ProductManagementBatchData,
 ): ProductManagementSpuLink[] {
-  return (
-    database
-      .prepare(
-        `SELECT id, record_id, spu, note, initial_review_price, review_price,
-                activity_discount_override, roas, order_count, created_at, updated_at
-         FROM product_management_spu_links WHERE record_id = ? ORDER BY id`,
-      )
-      .all(recordId) as SpuRow[]
-  ).map((row) => {
+  return (batch.spuRowsByRecord.get(row.id) ?? []).map((spuRow) => {
     const pricing = calculatePricing({
-      goodsValue,
-      weightKg,
+      goodsValue: row.goods_value,
+      weightKg: row.weight_kg,
       shippingCostPerKg: settings.shippingCostPerKg,
       recommendedProfitMargin: settings.recommendedProfitMargin,
       profitThresholdRate: settings.profitThresholdRate,
-      reviewPrice: row.review_price,
-      initialReviewPrice: row.initial_review_price,
-      activityDiscountOverride: row.activity_discount_override,
+      reviewPrice: spuRow.review_price,
+      initialReviewPrice: spuRow.initial_review_price,
+      activityDiscountOverride: spuRow.activity_discount_override,
     });
-    const trafficLimitPrice = trafficLimitPriceForSpu(shopId, row.spu);
+    const trafficLimitPrice = spuRow.spu
+      ? batch.trafficLimitBySpu.get(spuRow.spu) ?? null
+      : null;
     const trafficPricing = calculatePricing({
-      goodsValue,
-      weightKg,
+      goodsValue: row.goods_value,
+      weightKg: row.weight_kg,
       shippingCostPerKg: settings.shippingCostPerKg,
       recommendedProfitMargin: settings.recommendedProfitMargin,
       profitThresholdRate: settings.profitThresholdRate,
       reviewPrice: trafficLimitPrice,
       initialReviewPrice: null,
-      activityDiscountOverride: row.activity_discount_override,
+      activityDiscountOverride: spuRow.activity_discount_override,
     });
+    const image = spuRow.spu ? batch.imageBySpu.get(spuRow.spu) : undefined;
     return {
-      id: row.id,
-      spu: row.spu,
-      note: row.note,
-      initialReviewPrice: row.initial_review_price,
-      reviewPrice: row.review_price,
+      id: spuRow.id,
+      spu: spuRow.spu,
+      note: spuRow.note,
+      localImageUrl: image?.localImageUrl ?? null,
+      remoteImageUrl: image?.remoteImageUrl ?? null,
+      displayImageUrl: image?.displayImageUrl ?? null,
+      imageStatus: image?.imageStatus ?? "missing",
+      imageError: image?.imageError ?? null,
+      initialReviewPrice: spuRow.initial_review_price,
+      reviewPrice: spuRow.review_price,
       reviewProfitMargin: pricing.reviewProfitMargin,
       suggestedActivityDiscount: pricing.suggestedActivityDiscount,
-      activityDiscountOverride: row.activity_discount_override,
+      activityDiscountOverride: spuRow.activity_discount_override,
       finalActivityDiscount: pricing.finalActivityDiscount,
       activityPrice: pricing.activityPrice,
       trafficPrice: pricing.trafficPrice,
@@ -279,10 +423,10 @@ function spuLinksFor(
       trafficLimitActivityPrice: trafficPricing.activityPrice,
       trafficLimitTrafficPrice: trafficPricing.trafficPrice,
       trafficLimitRoas: trafficPricing.roas,
-      orderCount: row.order_count,
-      bindings: bindingsFor(row.id),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
+      orderCount: spuRow.order_count,
+      bindings: batch.bindingsBySpuLink.get(spuRow.id) ?? [],
+      createdAt: spuRow.created_at,
+      updatedAt: spuRow.updated_at,
     };
   });
 }
@@ -291,11 +435,9 @@ function mapRecord(
   row: RecordRow,
   user: UserAccount,
   settings: ProductManagementSettings,
+  batch: ProductManagementBatchData,
+  lifecycleMatch: ProductManagementRecord["lifecycleMatch"],
 ): ProductManagementRecord {
-  const lifecycleMatch = lifecycleMatchForProduct(
-    row.shop_profile_id,
-    row.product_code,
-  );
   const pricing = calculatePricing({
     goodsValue: row.goods_value,
     weightKg: row.weight_kg,
@@ -306,14 +448,6 @@ function mapRecord(
     initialReviewPrice: null,
     activityDiscountOverride: null,
   });
-  const purchaseLinks = (
-    database
-      .prepare(
-        `SELECT url FROM product_management_purchase_links
-         WHERE record_id = ? ORDER BY sort_order, id`,
-      )
-      .all(row.id) as Array<{ url: string }>
-  ).map((item) => item.url);
   return {
     id: row.id,
     shopProfileId: row.shop_profile_id,
@@ -329,14 +463,8 @@ function mapRecord(
     profitThresholdPrice: pricing.profitThresholdPrice,
     recommendedPrice: pricing.recommendedPrice,
     imageUrl: row.image_url,
-    purchaseLinks,
-    spuLinks: spuLinksFor(
-      row.shop_profile_id,
-      row.id,
-      row.goods_value,
-      row.weight_kg,
-      settings,
-    ),
+    purchaseLinks: batch.purchaseLinksByRecord.get(row.id) ?? [],
+    spuLinks: spuLinksFor(row, settings, batch),
     lifecycleMatch,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -348,6 +476,7 @@ export function listProductManagementRecords(
   user: UserAccount,
   scope: "mine" | "shop",
   search: ProductManagementSearch = {},
+  pagination: { page?: number; pageSize?: ProductManagementPageSize } = {},
 ): ProductManagementListResponse {
   const conditions = ["r.shop_profile_id = ?"];
   const args: Array<string | number> = [shopId];
@@ -437,21 +566,56 @@ export function listProductManagementRecords(
     conditions.push(`(${codeConditions.join(" OR ")})`);
   }
 
+  const pageSize = pagination.pageSize ?? getProductManagementPageSize(user.id);
+  const requestedPage = Math.max(1, Math.trunc(pagination.page ?? 1));
+  const total = (
+    database
+      .prepare(
+        `SELECT COUNT(*) AS total
+         FROM product_management_records r
+         WHERE ${conditions.join(" AND ")}`,
+      )
+      .get(...args) as { total: number }
+  ).total;
+  const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize);
+  const page = totalPages === 0 ? 1 : Math.min(requestedPage, totalPages);
   const rows = database
     .prepare(
       `SELECT r.*, u.username AS created_by_username
        FROM product_management_records r
        JOIN users u ON u.id = r.created_by_user_id
        WHERE ${conditions.join(" AND ")}
-       ORDER BY r.updated_at DESC, r.id DESC`,
+       ORDER BY r.updated_at DESC, r.id DESC
+       LIMIT ? OFFSET ?`,
     )
-    .all(...args) as RecordRow[];
+    .all(...args, pageSize, (page - 1) * pageSize) as RecordRow[];
   const settings = getProductManagementSettings();
+  const batch = loadBatchData(shopId, rows.map((row) => row.id));
+  const lifecycleMatches = lifecycleMatchesForProducts(
+    shopId,
+    rows.map((row) => row.product_code),
+  );
   return {
     scope,
     settings,
     columnPreferences: getProductManagementColumnPreferences(user.id),
-    records: rows.map((row) => mapRecord(row, user, settings)),
+    page,
+    pageSize,
+    total,
+    totalPages,
+    records: rows.map((row) => {
+      const record = mapRecord(
+        row,
+        user,
+        settings,
+        batch,
+        lifecycleMatches.get(row.product_code)!,
+      );
+      return {
+        ...record,
+        lifecycleMatch: { ...record.lifecycleMatch, details: [] },
+      };
+    }),
   };
 }
 
@@ -557,9 +721,7 @@ export function createProductManagementRecord(
     return id;
   });
   const id = create();
-  return listProductManagementRecords(shopId, user, "shop").records.find(
-    (record) => record.id === id,
-  )!;
+  return getProductManagementRecord(id, shopId, user);
 }
 
 export function updateProductManagementRecord(
@@ -591,9 +753,29 @@ export function updateProductManagementRecord(
     replaceChildren(recordId, input);
   });
   update();
-  return listProductManagementRecords(shopId, user, "shop").records.find(
-    (record) => record.id === recordId,
+  return getProductManagementRecord(recordId, shopId, user);
+}
+
+export function getProductManagementRecord(
+  recordId: number,
+  shopId: number,
+  user: UserAccount,
+): ProductManagementRecord {
+  const row = database
+    .prepare(
+      `SELECT r.*, u.username AS created_by_username
+       FROM product_management_records r
+       JOIN users u ON u.id = r.created_by_user_id
+       WHERE r.id = ? AND r.shop_profile_id = ?`,
+    )
+    .get(recordId, shopId) as RecordRow | undefined;
+  if (!row) throw new Error("产品主档不存在。");
+  const settings = getProductManagementSettings();
+  const batch = loadBatchData(shopId, [recordId]);
+  const lifecycleMatch = lifecycleMatchesForProducts(shopId, [row.product_code]).get(
+    row.product_code,
   )!;
+  return mapRecord(row, user, settings, batch, lifecycleMatch);
 }
 
 export function deleteProductManagementRecord(

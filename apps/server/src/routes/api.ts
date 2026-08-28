@@ -1,5 +1,6 @@
 import {
   PRODUCT_MANAGEMENT_COLUMN_KEYS,
+  PRODUCT_MANAGEMENT_PAGE_SIZES,
   type ImportBatch,
 } from "@temu-analytics/shared";
 import { Router } from "express";
@@ -41,7 +42,12 @@ import {
 } from "../backup/user-backup-service.js";
 import { config, paths } from "../config.js";
 import { database } from "../database/index.js";
-import { getBatchImageProgress } from "../import/image-task-service.js";
+import { findAuthorizedImageAsset } from "../import/image-access-service.js";
+import { resetMissingImageAsset } from "../import/image-asset-health-service.js";
+import {
+  getBatchImageProgress,
+  notifyImageTaskProcessor,
+} from "../import/image-task-service.js";
 import {
   commitPendingImport,
   createImportPreview,
@@ -56,8 +62,11 @@ import {
   createProductManagementRecord,
   deleteProductManagementRecord,
   getProductManagementColumnPreferences,
+  getProductManagementPageSize,
+  getProductManagementRecord,
   listProductManagementRecords,
   updateProductManagementColumnPreferences,
+  updateProductManagementPageSize,
   updateProductManagementRecord,
   updateProductManagementSettings,
 } from "../product-management/product-management-service.js";
@@ -248,6 +257,15 @@ apiRouter.get("/product-management", (request, response, next) => {
     const query = z
       .object({
         scope: z.enum(["mine", "shop"]).default("mine"),
+        page: z.coerce.number().int().positive().default(1),
+        pageSize: z.coerce
+          .number()
+          .refine(
+            (value) =>
+              (PRODUCT_MANAGEMENT_PAGE_SIZES as readonly number[]).includes(value),
+            "每页数量仅支持 20、50、100、200。",
+          )
+          .optional(),
         spu: z.string().trim().max(1000).optional(),
         skc: z.string().trim().max(1000).optional(),
         sku: z.string().trim().max(1000).optional(),
@@ -264,11 +282,18 @@ apiRouter.get("/product-management", (request, response, next) => {
     if (query.skc) search.skc = query.skc;
     if (query.sku) search.sku = query.sku;
     if (query.productCode) search.productCode = query.productCode;
+    const user = authenticatedUser(request);
+    const pageSize = (query.pageSize ?? getProductManagementPageSize(user.id)) as
+      | 20
+      | 50
+      | 100
+      | 200;
     const result = listProductManagementRecords(
       activeShopId(request),
-      authenticatedUser(request),
+      user,
       query.scope,
       search,
+      { page: query.page, pageSize },
     );
     response.json({ data: result });
   } catch (error) {
@@ -306,6 +331,23 @@ apiRouter.put("/product-management/columns", (request, response, next) => {
   }
 });
 
+apiRouter.put("/product-management/page-size", (request, response, next) => {
+  try {
+    const pageSize = z
+      .object({ pageSize: z.enum(["20", "50", "100", "200"]).transform(Number) })
+      .parse({ pageSize: String(request.body?.pageSize) }).pageSize as
+      | 20
+      | 50
+      | 100
+      | 200;
+    response.json({
+      data: { pageSize: updateProductManagementPageSize(authenticatedUser(request).id, pageSize) },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 apiRouter.post("/product-management", (request, response, next) => {
   try {
     response.status(201).json({
@@ -313,6 +355,20 @@ apiRouter.post("/product-management", (request, response, next) => {
         activeShopId(request),
         authenticatedUser(request),
         productManagementRecordSchema.parse(request.body),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/product-management/:id", (request, response, next) => {
+  try {
+    response.json({
+      data: getProductManagementRecord(
+        z.coerce.number().int().positive().parse(request.params.id),
+        activeShopId(request),
+        authenticatedUser(request),
       ),
     });
   } catch (error) {
@@ -634,23 +690,23 @@ apiRouter.get("/images/:fileName", (request, response, next) => {
       z.string().min(1).parse(request.params.fileName),
     );
     const shopId = activeShopId(request);
-    const allowed = database
-      .prepare(
-        `
-      SELECT 1 FROM products p JOIN image_assets a ON a.id = p.image_asset_id
-      WHERE p.shop_profile_id = ? AND a.file_name = ? LIMIT 1
-    `,
-      )
-      .get(shopId, fileName);
+    const allowed = findAuthorizedImageAsset(shopId, fileName);
     if (!allowed)
       return response
         .status(404)
         .json({ error: { code: "NOT_FOUND", message: "图片不存在。" } });
     const target = path.join(paths.images, fileName);
-    if (!fs.existsSync(target))
-      return response
-        .status(404)
-        .json({ error: { code: "NOT_FOUND", message: "图片文件不存在。" } });
+    if (!fs.existsSync(target)) {
+      if (resetMissingImageAsset(allowed.assetId) > 0) {
+        notifyImageTaskProcessor();
+      }
+      return response.status(404).json({
+        error: {
+          code: "IMAGE_FILE_MISSING",
+          message: "图片文件不存在，已自动加入重新下载队列。",
+        },
+      });
+    }
     return response.sendFile(target);
   } catch (error) {
     next(error);

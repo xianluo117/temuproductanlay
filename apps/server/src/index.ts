@@ -6,7 +6,7 @@ import { ZodError } from "zod";
 import { requireAuthentication } from "./auth/middleware.js";
 import { authRouter } from "./auth/routes.js";
 import { config } from "./config.js";
-import { closeDatabase } from "./database/index.js";
+import { closeDatabase, runDatabaseMigrations } from "./database/index.js";
 import {
   startImageTaskProcessor,
   stopImageTaskProcessor,
@@ -21,6 +21,8 @@ import {
   zhihouAdminRouter,
   zhihouOrderRouter,
 } from "./zhihou-erp/routes.js";
+
+runDatabaseMigrations();
 
 const app = express();
 app.disable("x-powered-by");

@@ -376,6 +376,8 @@ export function migrateProductManagement(database: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_product_management_records_shop_creator
       ON product_management_records(shop_profile_id, created_by_user_id, updated_at DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_product_management_records_shop_updated
+      ON product_management_records(shop_profile_id, updated_at DESC, id DESC);
     CREATE INDEX IF NOT EXISTS idx_product_management_records_shop_code
       ON product_management_records(shop_profile_id, product_code);
 
@@ -411,6 +413,8 @@ export function migrateProductManagement(database: Database.Database): void {
       ON product_management_spu_links(record_id, id);
     CREATE INDEX IF NOT EXISTS idx_product_management_spu_links_spu
       ON product_management_spu_links(spu) WHERE spu IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_product_management_spu_links_record_spu
+      ON product_management_spu_links(record_id, spu);
 
     CREATE TABLE IF NOT EXISTS product_management_bindings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -573,6 +577,75 @@ export function migrateZhihouErp(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_zhihou_items_order
       ON zhihou_new_order_items(order_id, id);
   `);
+}
+
+/**
+ * 图片文件按内容哈希全局去重；此处只维护业务对象与下载任务的关联。
+ * ERP 规格图归属为 SKC 图，未匹配时以 ERP SKU 作为临时目标。
+ */
+export function migrateProductImages(database: Database.Database): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS image_download_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      normalized_url TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      last_error TEXT,
+      asset_id INTEGER,
+      next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (asset_id) REFERENCES image_assets(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_image_download_tasks_queue
+      ON image_download_tasks(status, next_attempt_at, id);
+
+    CREATE TABLE IF NOT EXISTS image_download_targets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL,
+      target_type TEXT NOT NULL CHECK (target_type IN ('spu', 'skc', 'erp_sku')),
+      shop_profile_id INTEGER,
+      target_key TEXT NOT NULL,
+      source_type TEXT NOT NULL CHECK (source_type IN ('traffic', 'lifecycle', 'erp')),
+      priority INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (target_type, shop_profile_id, target_key),
+      FOREIGN KEY (task_id) REFERENCES image_download_tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (shop_profile_id) REFERENCES temu_shop_profiles(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_image_download_targets_task
+      ON image_download_targets(task_id);
+    CREATE INDEX IF NOT EXISTS idx_image_download_targets_lookup
+      ON image_download_targets(target_type, shop_profile_id, target_key);
+    CREATE INDEX IF NOT EXISTS idx_image_download_targets_spu_lookup
+      ON image_download_targets(shop_profile_id, target_key, task_id)
+      WHERE target_type = 'spu';
+  `);
+
+  if (!hasColumn(database, "temu_lifecycle_skc_current", "image_url")) {
+    database.exec(
+      "ALTER TABLE temu_lifecycle_skc_current ADD COLUMN image_url TEXT",
+    );
+  }
+  if (!hasColumn(database, "temu_lifecycle_skc_current", "image_asset_id")) {
+    database.exec(
+      "ALTER TABLE temu_lifecycle_skc_current ADD COLUMN image_asset_id INTEGER REFERENCES image_assets(id)",
+    );
+  }
+  if (!hasColumn(database, "zhihou_new_order_items", "image_asset_id")) {
+    database.exec(
+      "ALTER TABLE zhihou_new_order_items ADD COLUMN image_asset_id INTEGER REFERENCES image_assets(id)",
+    );
+  }
+  if (!hasColumn(database, "zhihou_new_order_items", "image_target_key")) {
+    database.exec(
+      "ALTER TABLE zhihou_new_order_items ADD COLUMN image_target_key TEXT",
+    );
+  }
 }
 
 export function migrateTemuShopProfiles(database: Database.Database): void {

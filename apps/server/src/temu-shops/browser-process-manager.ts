@@ -12,6 +12,7 @@ import {
   resetStaleTemuBrowserRuntime,
   updateTemuShopRuntime,
 } from "./temu-shop-service.js";
+import { enqueueSyncIngestion } from "./sync-ingestion-queue.js";
 import {
   completeLifecycleSync,
   completeTrafficSync,
@@ -36,7 +37,23 @@ interface WorkerMessage {
   httpStatus?: number;
   durationMs?: number;
   payload?: Record<string, unknown>;
+  responseHeaders?: Record<string, unknown>;
+  endpoint?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  waitSeconds?: number;
   items?: Array<Record<string, unknown>>;
+}
+
+interface RateLimitDiagnostic extends Record<string, unknown> {
+  endpoint?: string;
+  requestBody?: Record<string, unknown>;
+  httpStatus?: number;
+  responseHeaders?: Record<string, unknown>;
+  payload?: Record<string, unknown>;
+  attempt?: number;
+  maxAttempts?: number;
+  waitSeconds?: number;
 }
 
 interface ManagedWorker {
@@ -45,6 +62,63 @@ interface ManagedWorker {
 }
 
 const workers = new Map<number, ManagedWorker>();
+const latestRateLimitDiagnostics = new Map<string, RateLimitDiagnostic>();
+const receivedLifecyclePages = new Map<string, number>();
+const receivedTrafficPages = new Map<string, number>();
+
+function syncIngestionKey(
+  shopId: number,
+  syncId: number,
+  type: "lifecycle" | "traffic",
+): string {
+  return `${type}:${shopId}:${syncId}`;
+}
+
+function ingestionErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function rateLimitDiagnosticKey(shopId: number, syncId: number): string {
+  return `${shopId}:${syncId}`;
+}
+
+function diagnosticDetails(message: WorkerMessage): RateLimitDiagnostic {
+  return {
+    ...(message.endpoint === undefined ? {} : { endpoint: message.endpoint }),
+    ...(message.requestBody === undefined
+      ? {}
+      : { requestBody: message.requestBody }),
+    ...(message.httpStatus === undefined
+      ? {}
+      : { httpStatus: message.httpStatus }),
+    ...(message.responseHeaders === undefined
+      ? {}
+      : { responseHeaders: message.responseHeaders }),
+    ...(message.payload === undefined ? {} : { payload: message.payload }),
+    ...(message.attempt === undefined ? {} : { attempt: message.attempt }),
+    ...(message.maxAttempts === undefined
+      ? {}
+      : { maxAttempts: message.maxAttempts }),
+    ...(message.waitSeconds === undefined
+      ? {}
+      : { waitSeconds: message.waitSeconds }),
+  };
+}
+
+function rateLimitFailureMessage(
+  shopId: number,
+  message: WorkerMessage,
+  fallback: string,
+): string {
+  const diagnostic = latestRateLimitDiagnostics.get(
+    rateLimitDiagnosticKey(shopId, message.syncId ?? 0),
+  );
+  const attempt = diagnostic?.attempt;
+  const maxAttempts = diagnostic?.maxAttempts;
+  const waitSeconds = diagnostic?.waitSeconds;
+  if (!attempt || !maxAttempts || !waitSeconds) return message.message ?? fallback;
+  return `${message.message ?? fallback}（HTTP 429，第 ${attempt}/${maxAttempts} 次，最后退避 ${Math.round(waitSeconds)} 秒。）`;
+}
 
 function workerArgs(profile: TemuShopProfile): string[] {
   return [
@@ -66,47 +140,189 @@ function workerArgs(profile: TemuShopProfile): string[] {
 }
 
 function handleWorkerMessage(shopId: number, message: WorkerMessage): void {
-  if (message.event === "lifecycle_page" && message.syncId) {
-    storeLifecyclePage(shopId, {
-      syncId: message.syncId,
-      pageNumber: message.pageNumber ?? 1,
-      pageSize: message.pageSize ?? 50,
-      total: message.total ?? 0,
-      totalPages: message.totalPages ?? 1,
-      requestBody: message.requestBody ?? {},
-      httpStatus: message.httpStatus ?? 0,
-      durationMs: message.durationMs ?? 0,
-      payload: message.payload ?? {},
-      items: message.items ?? [],
-    });
-  } else if (message.event === "lifecycle_completed" && message.syncId) {
-    completeLifecycleSync(shopId, message.syncId);
-  } else if (message.event === "lifecycle_failed" && message.syncId) {
-    failLifecycleSync(
+  if (
+    (message.event === "lifecycle_rate_limited" ||
+      message.event === "traffic_rate_limited") &&
+    message.syncId
+  ) {
+    const diagnostic = diagnosticDetails(message);
+    latestRateLimitDiagnostics.set(
+      rateLimitDiagnosticKey(shopId, message.syncId),
+      diagnostic,
+    );
+    addTemuBrowserEvent(
       shopId,
-      message.syncId,
-      message.message ?? "生命周期同步失败。",
+      `WORKER_${String(message.event).toUpperCase()}`,
+      null,
+      `Temu HTTP 429；第 ${message.attempt ?? "?"}/${message.maxAttempts ?? "?"} 次退避 ${Math.round(message.waitSeconds ?? 0)} 秒。`,
+      diagnostic,
+    );
+    return;
+  }
+  if (message.event === "lifecycle_page" && message.syncId) {
+    const syncId = message.syncId;
+    const syncKey = rateLimitDiagnosticKey(shopId, syncId);
+    enqueueSyncIngestion(
+      syncIngestionKey(shopId, syncId, "lifecycle"),
+      () => {
+        storeLifecyclePage(shopId, {
+          syncId,
+          pageNumber: message.pageNumber ?? 1,
+          pageSize: message.pageSize ?? 50,
+          total: message.total ?? 0,
+          totalPages: message.totalPages ?? 1,
+          requestBody: message.requestBody ?? {},
+          httpStatus: message.httpStatus ?? 0,
+          durationMs: message.durationMs ?? 0,
+          payload: message.payload ?? {},
+          items: message.items ?? [],
+        });
+        receivedLifecyclePages.set(
+          syncKey,
+          Math.max(
+            receivedLifecyclePages.get(syncKey) ?? 0,
+            message.pageNumber ?? 0,
+          ),
+        );
+      },
+      (error) => {
+        receivedLifecyclePages.delete(syncKey);
+        failLifecycleSync(
+          shopId,
+          syncId,
+          `生命周期分页异步写入失败：${ingestionErrorMessage(error, "未知错误")}`,
+        );
+      },
+    );
+  } else if (message.event === "lifecycle_completed" && message.syncId) {
+    const syncId = message.syncId;
+    const syncKey = rateLimitDiagnosticKey(shopId, syncId);
+    latestRateLimitDiagnostics.delete(syncKey);
+    enqueueSyncIngestion(
+      syncIngestionKey(shopId, syncId, "lifecycle"),
+      () => {
+        const receivedPages = receivedLifecyclePages.get(syncKey) ?? 0;
+        receivedLifecyclePages.delete(syncKey);
+        if (receivedPages === 0) {
+          failLifecycleSync(
+            shopId,
+            syncId,
+            "生命周期 Worker 未发送可解析的分页数据，已阻止将空结果标记为完成。",
+          );
+          return;
+        }
+        completeLifecycleSync(shopId, syncId);
+      },
+      (error) => {
+        receivedLifecyclePages.delete(syncKey);
+        failLifecycleSync(
+          shopId,
+          syncId,
+          `生命周期完成后处理失败：${ingestionErrorMessage(error, "未知错误")}`,
+        );
+      },
+    );
+  } else if (message.event === "lifecycle_failed" && message.syncId) {
+    const syncId = message.syncId;
+    const syncKey = rateLimitDiagnosticKey(shopId, syncId);
+    enqueueSyncIngestion(
+      syncIngestionKey(shopId, syncId, "lifecycle"),
+      () => {
+        receivedLifecyclePages.delete(syncKey);
+        failLifecycleSync(
+          shopId,
+          syncId,
+          rateLimitFailureMessage(shopId, message, "生命周期同步失败。"),
+        );
+      },
+      (error) =>
+        addTemuBrowserEvent(
+          shopId,
+          "LIFECYCLE_FAILURE_WRITE_FAILED",
+          "ERROR",
+          ingestionErrorMessage(error, "生命周期失败状态写入失败。"),
+        ),
     );
   } else if (message.event === "traffic_page" && message.syncId) {
-    storeTrafficPage(shopId, {
-      syncId: message.syncId,
-      pageNumber: message.pageNumber ?? 1,
-      pageSize: message.pageSize ?? 30,
-      total: message.total ?? 0,
-      totalPages: message.totalPages ?? 1,
-      requestBody: message.requestBody ?? {},
-      httpStatus: message.httpStatus ?? 0,
-      durationMs: message.durationMs ?? 0,
-      payload: message.payload ?? {},
-      items: message.items ?? [],
-    });
+    const syncId = message.syncId;
+    const syncKey = rateLimitDiagnosticKey(shopId, syncId);
+    enqueueSyncIngestion(
+      syncIngestionKey(shopId, syncId, "traffic"),
+      () => {
+        storeTrafficPage(shopId, {
+          syncId,
+          pageNumber: message.pageNumber ?? 1,
+          pageSize: message.pageSize ?? 30,
+          total: message.total ?? 0,
+          totalPages: message.totalPages ?? 1,
+          requestBody: message.requestBody ?? {},
+          httpStatus: message.httpStatus ?? 0,
+          durationMs: message.durationMs ?? 0,
+          payload: message.payload ?? {},
+          items: message.items ?? [],
+        });
+        receivedTrafficPages.set(
+          syncKey,
+          Math.max(receivedTrafficPages.get(syncKey) ?? 0, message.pageNumber ?? 0),
+        );
+      },
+      (error) => {
+        receivedTrafficPages.delete(syncKey);
+        failTrafficSync(
+          shopId,
+          syncId,
+          `商品流量分页异步写入失败：${ingestionErrorMessage(error, "未知错误")}`,
+        );
+      },
+    );
   } else if (message.event === "traffic_completed" && message.syncId) {
-    completeTrafficSync(shopId, message.syncId);
+    const syncId = message.syncId;
+    const syncKey = rateLimitDiagnosticKey(shopId, syncId);
+    latestRateLimitDiagnostics.delete(syncKey);
+    enqueueSyncIngestion(
+      syncIngestionKey(shopId, syncId, "traffic"),
+      () => {
+        const receivedPages = receivedTrafficPages.get(syncKey) ?? 0;
+        receivedTrafficPages.delete(syncKey);
+        if (receivedPages === 0) {
+          failTrafficSync(
+            shopId,
+            syncId,
+            "商品流量 Worker 未发送可解析的分页数据，已阻止将空结果标记为完成。",
+          );
+          return;
+        }
+        completeTrafficSync(shopId, syncId);
+      },
+      (error) => {
+        receivedTrafficPages.delete(syncKey);
+        failTrafficSync(
+          shopId,
+          syncId,
+          `商品流量完成后处理失败：${ingestionErrorMessage(error, "未知错误")}`,
+        );
+      },
+    );
   } else if (message.event === "traffic_failed" && message.syncId) {
-    failTrafficSync(
-      shopId,
-      message.syncId,
-      message.message ?? "商品流量同步失败。",
+    const syncId = message.syncId;
+    const syncKey = rateLimitDiagnosticKey(shopId, syncId);
+    enqueueSyncIngestion(
+      syncIngestionKey(shopId, syncId, "traffic"),
+      () => {
+        receivedTrafficPages.delete(syncKey);
+        failTrafficSync(
+          shopId,
+          syncId,
+          rateLimitFailureMessage(shopId, message, "商品流量同步失败。"),
+        );
+      },
+      (error) =>
+        addTemuBrowserEvent(
+          shopId,
+          "TRAFFIC_FAILURE_WRITE_FAILED",
+          "ERROR",
+          ingestionErrorMessage(error, "商品流量失败状态写入失败。"),
+        ),
     );
   }
 
@@ -174,10 +390,29 @@ export function startTemuBrowser(shopId: number): TemuShopProfile {
 
   const output = readline.createInterface({ input: child.stdout });
   output.on("line", (line: string) => {
+    let message: WorkerMessage;
     try {
-      handleWorkerMessage(shopId, JSON.parse(line) as WorkerMessage);
-    } catch {
-      addTemuBrowserEvent(shopId, "WORKER_OUTPUT", null, line.slice(0, 2000));
+      message = JSON.parse(line) as WorkerMessage;
+    } catch (error) {
+      addTemuBrowserEvent(
+        shopId,
+        "WORKER_OUTPUT_INVALID_JSON",
+        null,
+        error instanceof Error ? error.message : "Worker 输出不是有效 JSON。",
+        { outputPreview: line.slice(0, 2000) },
+      );
+      return;
+    }
+    try {
+      handleWorkerMessage(shopId, message);
+    } catch (error) {
+      addTemuBrowserEvent(
+        shopId,
+        "WORKER_MESSAGE_HANDLER_FAILED",
+        "ERROR",
+        ingestionErrorMessage(error, "Worker 消息处理失败。"),
+        { event: message.event, syncId: message.syncId },
+      );
     }
   });
   child.stderr.on("data", (chunk: Buffer) => {

@@ -11,6 +11,7 @@ import { createShopBackup } from "../backup/user-backup-service.js";
 import { paths } from "../config.js";
 import { database } from "../database/index.js";
 import { storeEmbeddedImage } from "./image-service.js";
+import { queueImageTarget } from "./image-association-service.js";
 import { notifyImageTaskProcessor } from "./image-task-service.js";
 import { parseTemuWorkbook } from "./parser.js";
 import type { ParsedProductRow, PendingImport, StoredImage } from "./types.js";
@@ -256,14 +257,6 @@ export async function commitPendingImport(
         impression_order_conversion_rate, search_impressions)
        VALUES (?, ?, ?, ?, 'excel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    const enqueueRemoteImage = database.prepare(`
-      INSERT OR IGNORE INTO remote_image_tasks (shop_profile_id, batch_id, spu, image_url)
-      SELECT ?, ?, ?, ?
-      WHERE NOT EXISTS (
-        SELECT 1 FROM remote_image_tasks
-        WHERE shop_profile_id = ? AND spu = ? AND image_url = ? AND status = 'completed'
-      )
-    `);
     let queuedImageCount = 0;
 
     for (const row of pending.parsed.rows) {
@@ -276,15 +269,15 @@ export async function commitPendingImport(
         row.remoteImageUrl,
       );
       if (!image && row.remoteImageUrl) {
-        queuedImageCount += enqueueRemoteImage.run(
+        const taskId = queueImageTarget({
+          url: row.remoteImageUrl,
+          targetType: "spu",
           shopId,
-          batchId,
-          row.spu,
-          row.remoteImageUrl,
-          shopId,
-          row.spu,
-          row.remoteImageUrl,
-        ).changes;
+          targetKey: row.spu,
+          sourceType: "traffic",
+          priority: 300,
+        });
+        if (taskId !== null) queuedImageCount += 1;
       }
       insertMetric.run(
         shopId,

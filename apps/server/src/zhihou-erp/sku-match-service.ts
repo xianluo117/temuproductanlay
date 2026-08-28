@@ -11,6 +11,11 @@ interface MatchRow {
   parent_spu: string | null;
 }
 
+export interface MatchedSkcImageTarget {
+  shopId: number;
+  skcRowId: number;
+}
+
 function normalizedSku(value: string): string {
   return value.trim().toUpperCase();
 }
@@ -94,4 +99,30 @@ export function matchZhihouSku(zhihouSku: string): ZhihouSkuMatchResult {
     purchaseLinks: [],
     message: "未在产品管理的 SKU ID 或 SKU 编码中找到匹配项。",
   };
+}
+
+/** 返回唯一 SKU 绑定对应的当前生命周期 SKC，用于将 ERP 规格图直接归属为 SKC 图片。 */
+export function findMatchedSkcImageTarget(
+  zhihouSku: string,
+): MatchedSkcImageTarget | null {
+  const sku = normalizedSku(zhihouSku);
+  const rows = database
+    .prepare(
+      `SELECT DISTINCT record.shop_profile_id, lifecycle_skc.id AS skc_row_id
+       FROM product_management_bindings binding
+       JOIN product_management_spu_links link ON link.id = binding.spu_link_id
+       JOIN product_management_records record ON record.id = link.record_id
+       JOIN temu_lifecycle_spu_current lifecycle_spu
+         ON lifecycle_spu.shop_profile_id = record.shop_profile_id
+        AND lifecycle_spu.spu = link.spu
+       JOIN temu_lifecycle_skc_current lifecycle_skc
+         ON lifecycle_skc.spu_row_id = lifecycle_spu.id
+       LEFT JOIN temu_lifecycle_sku_current lifecycle_sku
+         ON lifecycle_sku.skc_row_id = lifecycle_skc.id
+       WHERE UPPER(TRIM(COALESCE(binding.sku_id, ''))) = ?
+          OR UPPER(TRIM(COALESCE(binding.sku_code, ''))) = ?`,
+    )
+    .all(sku, sku) as Array<{ shop_profile_id: number; skc_row_id: number }>;
+  if (rows.length !== 1) return null;
+  return { shopId: rows[0]!.shop_profile_id, skcRowId: rows[0]!.skc_row_id };
 }

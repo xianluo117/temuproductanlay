@@ -9,6 +9,8 @@ import type {
   DashboardResponse,
   GlobalOperationInput,
   GlobalOperationRecord,
+  ImageDownloadConcurrencySettings,
+  ImageDownloadConcurrencySettingsInput,
   ImportBatch,
   ImportCommitResponse,
   ImportPreview,
@@ -152,14 +154,30 @@ export interface ProductManagementSearchParams {
   productCode?: string;
 }
 
+export interface ProductManagementListParams
+  extends ProductManagementSearchParams {
+  page?: number;
+  pageSize?: 20 | 50 | 100 | 200;
+}
+
 export async function getProductManagementRecords(
   scope: "mine" | "shop" = "mine",
-  search: ProductManagementSearchParams = {},
+  params: ProductManagementListParams = {},
 ): Promise<ProductManagementListResponse> {
   return (
     await http.get<ApiResponse<ProductManagementListResponse>>(
       "/product-management",
-      { params: { scope, ...search } },
+      { params: { scope, ...params } },
+    )
+  ).data.data;
+}
+
+export async function getProductManagementRecord(
+  id: number,
+): Promise<ProductManagementRecord> {
+  return (
+    await http.get<ApiResponse<ProductManagementRecord>>(
+      `/product-management/${id}`,
     )
   ).data.data;
 }
@@ -212,6 +230,17 @@ export async function saveProductManagementColumnPreferences(
       input,
     )
   ).data.data;
+}
+
+export async function saveProductManagementPageSize(
+  pageSize: 20 | 50 | 100 | 200,
+): Promise<20 | 50 | 100 | 200> {
+  return (
+    await http.put<ApiResponse<{ pageSize: 20 | 50 | 100 | 200 }>>(
+      "/product-management/page-size",
+      { pageSize },
+    )
+  ).data.data.pageSize;
 }
 
 export async function saveProductManagementSettings(
@@ -442,6 +471,25 @@ export async function restoreUploadedSystemBackup(file: File): Promise<void> {
   const form = new FormData();
   form.append("file", file);
   await http.post("/system-backups/restore", form);
+}
+
+export async function getImageDownloadConcurrencySettings(): Promise<ImageDownloadConcurrencySettings> {
+  return (
+    await http.get<ApiResponse<ImageDownloadConcurrencySettings>>(
+      "/admin/temu-shops/settings/image-download-concurrency",
+    )
+  ).data.data;
+}
+
+export async function saveImageDownloadConcurrencySettings(
+  input: ImageDownloadConcurrencySettingsInput,
+): Promise<ImageDownloadConcurrencySettings> {
+  return (
+    await http.put<ApiResponse<ImageDownloadConcurrencySettings>>(
+      "/admin/temu-shops/settings/image-download-concurrency",
+      input,
+    )
+  ).data.data;
 }
 
 export async function getTemuShopProfiles(): Promise<TemuShopProfile[]> {

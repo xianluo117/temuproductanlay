@@ -8,9 +8,11 @@ import type {
 } from "@temu-analytics/shared";
 import {
   Button,
+  Card,
   Drawer,
   Form,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
   Select,
@@ -32,6 +34,8 @@ import {
   getTemuBrowserEvents,
   getTemuShopProfiles,
   getUsers,
+  getImageDownloadConcurrencySettings,
+  saveImageDownloadConcurrencySettings,
   startTemuLifecycleSync,
   startTemuShopBrowser,
   startTemuTrafficSync,
@@ -82,6 +86,11 @@ interface ProfileForm {
   grantedUserIds: number[];
 }
 
+interface ImageDownloadSettingsForm {
+  legacyImportConcurrency: number;
+  globalQueueConcurrency: number;
+}
+
 export function TemuShopsPage() {
   const { session } = useAuth();
   const [items, setItems] = useState<TemuShopProfile[]>([]);
@@ -99,7 +108,9 @@ export function TemuShopsPage() {
     null,
   );
   const [busyId, setBusyId] = useState<number | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
   const [form] = Form.useForm<ProfileForm>();
+  const [settingsForm] = Form.useForm<ImageDownloadSettingsForm>();
   const [messageApi, contextHolder] = message.useMessage();
 
   const reload = useCallback(async () => {
@@ -136,12 +147,32 @@ export function TemuShopsPage() {
   }, []);
   useEffect(() => {
     if (session?.user.role !== "admin") return;
-    void Promise.all([reload(), getUsers().then(setUsers)]);
+    void Promise.all([
+      reload(),
+      getUsers().then(setUsers),
+      getImageDownloadConcurrencySettings().then((settings) =>
+        settingsForm.setFieldsValue(settings),
+      ),
+    ]).catch((error) => messageApi.error(errorMessage(error)));
     const timer = window.setInterval(() => void reload(), 3000);
     return () => window.clearInterval(timer);
-  }, [reload, session?.user.role]);
+  }, [messageApi, reload, session?.user.role, settingsForm]);
 
   if (session?.user.role !== "admin") return <Text>无权访问管理员后台。</Text>;
+
+  const saveImageDownloadSettings = async () => {
+    setSettingsLoading(true);
+    try {
+      const values = await settingsForm.validateFields();
+      const settings = await saveImageDownloadConcurrencySettings(values);
+      settingsForm.setFieldsValue(settings);
+      messageApi.success("图片下载并发设置已保存");
+    } catch (error) {
+      if (error instanceof Error) messageApi.error(errorMessage(error));
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
 
   const showCreate = () => {
     setEditing(null);
@@ -262,6 +293,49 @@ export function TemuShopsPage() {
           新建店铺档案
         </Button>
       </div>
+      <Card title="图片下载并发设置" style={{ marginBottom: 16 }}>
+        <Form
+          form={settingsForm}
+          layout="inline"
+          initialValues={{
+            legacyImportConcurrency: 10,
+            globalQueueConcurrency: 10,
+          }}
+        >
+          <Form.Item
+            name="legacyImportConcurrency"
+            label="旧导入图片队列"
+            rules={[
+              { required: true, message: "请输入并发上限" },
+              { type: "integer", min: 1, max: 50, message: "请输入 1–50 的整数" },
+            ]}
+          >
+            <InputNumber min={1} max={50} precision={0} style={{ width: 140 }} />
+          </Form.Item>
+          <Form.Item
+            name="globalQueueConcurrency"
+            label="全局图片队列"
+            rules={[
+              { required: true, message: "请输入并发上限" },
+              { type: "integer", min: 1, max: 50, message: "请输入 1–50 的整数" },
+            ]}
+          >
+            <InputNumber min={1} max={50} precision={0} style={{ width: 140 }} />
+          </Form.Item>
+          <Form.Item>
+            <Button
+              type="primary"
+              loading={settingsLoading}
+              onClick={() => void saveImageDownloadSettings()}
+            >
+              保存设置
+            </Button>
+          </Form.Item>
+        </Form>
+        <Text type="secondary">
+          默认均为 10，允许 1–50。提高上限后立即补充任务；降低上限不会中断正在下载的任务，仅限制后续领取。
+        </Text>
+      </Card>
       <Table
         rowKey="id"
         dataSource={items}

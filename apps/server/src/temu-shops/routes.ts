@@ -2,6 +2,11 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAdministrator } from "../auth/middleware.js";
 import {
+  getImageDownloadConcurrencySettings,
+  updateImageDownloadConcurrencySettings,
+} from "../import/image-download-settings-service.js";
+import { notifyImageTaskProcessor } from "../import/image-task-service.js";
+import {
   healthCheckTemuBrowser,
   startTemuBrowser,
   stopTemuBrowser,
@@ -42,6 +47,29 @@ const updateSchema = createSchema.omit({ grantedUserIds: true }).partial();
 const grantSchema = z.object({
   userIds: z.array(z.number().int().positive()).max(500),
 });
+const imageDownloadSettingsSchema = z.object({
+  legacyImportConcurrency: z.number().int().min(1).max(50),
+  globalQueueConcurrency: z.number().int().min(1).max(50),
+});
+
+temuShopAdminRouter.get("/settings/image-download-concurrency", (_request, response) => {
+  response.json({ data: getImageDownloadConcurrencySettings() });
+});
+
+temuShopAdminRouter.put(
+  "/settings/image-download-concurrency",
+  (request, response, next) => {
+    try {
+      const settings = updateImageDownloadConcurrencySettings(
+        imageDownloadSettingsSchema.parse(request.body),
+      );
+      notifyImageTaskProcessor();
+      response.json({ data: settings });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 temuShopAdminRouter.get("/", (_request, response) =>
   response.json({ data: listTemuShopProfiles() }),

@@ -4,6 +4,11 @@ import type {
   TemuTrafficSyncStatus,
 } from "@temu-analytics/shared";
 import { createShopBackup } from "../backup/user-backup-service.js";
+import {
+  lifecycleSkcImageKey,
+  promoteErpSkuImageToSkc,
+  queueImageTarget,
+} from "../import/image-association-service.js";
 import { database } from "../database/index.js";
 import { autoCreateLifecycleProductRecords } from "./lifecycle-auto-service.js";
 import {
@@ -102,8 +107,8 @@ export function listLifecycleCurrent(
   const items = spus.map((spu) => {
     const skcs = database
       .prepare(
-        `SELECT id, skc_id, skc_code, attribute_json, lowest_review_price,
-                traffic_limit_price
+        `SELECT id, skc_id, skc_code, attribute_json, image_url, image_asset_id,
+                lowest_review_price, traffic_limit_price
          FROM temu_lifecycle_skc_current WHERE spu_row_id = ? ORDER BY id`,
       )
       .all(Number(spu.id)) as Array<Record<string, unknown>>;
@@ -127,6 +132,8 @@ export function listLifecycleCurrent(
         skcId: (skc.skc_id as string | null) ?? null,
         skcCode: (skc.skc_code as string | null) ?? null,
         attributeJson: (skc.attribute_json as string | null) ?? null,
+        imageUrl: (skc.image_url as string | null) ?? null,
+        imageAssetId: (skc.image_asset_id as number | null) ?? null,
         lowestSupplierPrice: skcLowestSupplierPrice,
         lowestReviewPrice: skcLowestSupplierPrice,
         trafficLimitPrice: (skc.traffic_limit_price as number | null) ?? null,
@@ -407,9 +414,9 @@ export function storeLifecyclePage(shopId: number, page: LifecyclePage): void {
     );
     const skcs = database.prepare(`
       INSERT INTO temu_lifecycle_skc_current
-        (spu_row_id, sync_batch_id, skc_id, skc_code, attribute_json,
+        (spu_row_id, sync_batch_id, skc_id, skc_code, attribute_json, image_url,
          lowest_review_price, traffic_limit_price, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     `);
     const skus = database.prepare(`
       INSERT INTO temu_lifecycle_sku_current
@@ -474,6 +481,9 @@ export function storeLifecyclePage(shopId: number, page: LifecyclePage): void {
           lifecycleSuggestedPrice(skc),
           ...skuItems.map((sku) => lifecycleSuggestedPrice(sku)),
         ]);
+        const skcImage = lifecycleImage(skc) ?? lifecycleSkus(skc)
+          .map((sku) => lifecycleImage(sku))
+          .find((url): url is string => Boolean(url));
         const skcResult = skcs.run(
           spuId,
           page.syncId,
@@ -483,22 +493,35 @@ export function storeLifecyclePage(shopId: number, page: LifecyclePage): void {
             ...(Array.isArray(skc.productPropertyList) ? skc.productPropertyList : []),
             ...(skc.colorName ? [{ name: "颜色", value: skc.colorName }] : []),
           ]),
+          skcImage ?? null,
           skcSupplierPrice,
           skcSuggestedPrice,
         );
         const skcRowId = Number(skcResult.lastInsertRowid);
+        if (skcImage) {
+          queueImageTarget({
+            url: skcImage,
+            targetType: "skc",
+            shopId,
+            targetKey: lifecycleSkcImageKey(skcRowId),
+            sourceType: "lifecycle",
+            priority: 100,
+          });
+        }
         skcCount += 1;
         for (const sku of skuItems) {
+          const skuId = textValue(sku, ["skuId", "goodsSkuId", "id"]);
+          const skuCode = textValue(sku, [
+            "skuCode",
+            "goodsSkuCode",
+            "extCode",
+            "productCode",
+          ]);
           skus.run(
             skcRowId,
             page.syncId,
-            textValue(sku, ["skuId", "goodsSkuId", "id"]),
-            textValue(sku, [
-              "skuCode",
-              "goodsSkuCode",
-              "extCode",
-              "productCode",
-            ]),
+            skuId,
+            skuCode,
             textValue(sku, ["sizeName", "size", "specification"]),
             JSON.stringify(
               sku.productPropertyList ??
@@ -509,6 +532,9 @@ export function storeLifecyclePage(shopId: number, page: LifecyclePage): void {
             lifecycleSupplierPrice(sku),
             lifecycleSuggestedPrice(sku),
           );
+          for (const zhihouSku of [skuId, skuCode]) {
+            promoteErpSkuImageToSkc({ zhihouSku, shopId, skcRowId });
+          }
           skuCount += 1;
         }
       }
@@ -769,21 +795,32 @@ export function storeTrafficPage(shopId: number, page: TrafficPage): void {
         );
         replaced += 1;
       }
+      const imageUrl = textValue(item, [
+        "thumbUrl",
+        "imageUrl",
+        "goodsImageUrl",
+        "mainImageUrl",
+        "productImageUrl",
+      ]);
       upsertProduct.run(
         shopId,
         spu,
         firstListedAt,
-        textValue(item, [
-          "thumbUrl",
-          "imageUrl",
-          "goodsImageUrl",
-          "mainImageUrl",
-          "productImageUrl",
-        ]),
+        imageUrl,
         textValue(item, ["goodsId"]),
         textValue(item, ["siteId"]),
         textValue(item, ["goodsName", "productName", "title"]),
       );
+      if (imageUrl) {
+        queueImageTarget({
+          url: imageUrl,
+          targetType: "spu",
+          shopId,
+          targetKey: spu,
+          sourceType: "traffic",
+          priority: 300,
+        });
+      }
       upsertMetric.run(
         shopId,
         dataDate,

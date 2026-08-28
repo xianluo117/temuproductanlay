@@ -91,51 +91,72 @@ function emptyMatch(): ProductLifecycleMatch {
 }
 
 function lifecycleRowsForShop(shopId: number): LifecycleSpuRow[] {
-  const spus = database
+  const rows = database
     .prepare(
-      `SELECT id, spu
-       FROM temu_lifecycle_spu_current
-       WHERE shop_profile_id = ? ORDER BY id`,
+      `SELECT spu_row.id AS spu_row_id, spu_row.spu,
+              skc.id AS skc_row_id, skc.skc_id, skc.skc_code,
+              skc.attribute_json, skc.lowest_review_price, skc.traffic_limit_price,
+              sku.id AS sku_row_id, sku.sku_code, sku.sku_id, sku.size_name,
+              sku.specification_json, sku.lowest_supplier_price, sku.suggested_price
+       FROM temu_lifecycle_spu_current spu_row
+       LEFT JOIN temu_lifecycle_skc_current skc ON skc.spu_row_id = spu_row.id
+       LEFT JOIN temu_lifecycle_sku_current sku ON sku.skc_row_id = skc.id
+       WHERE spu_row.shop_profile_id = ?
+       ORDER BY spu_row.id, skc.id, sku.id`,
     )
-    .all(shopId) as Array<{ id: number; spu: string }>;
-
-  return spus.map((spu) => {
-    const skcs = database
-      .prepare(
-        `SELECT id, skc_id, skc_code, attribute_json, lowest_review_price,
-                traffic_limit_price
-         FROM temu_lifecycle_skc_current
-         WHERE spu_row_id = ? ORDER BY id`,
-      )
-      .all(spu.id) as Array<{
-      id: number;
+    .all(shopId) as Array<{
+      spu_row_id: number;
+      spu: string;
+      skc_row_id: number | null;
       skc_id: string | null;
       skc_code: string | null;
       attribute_json: string | null;
       lowest_review_price: number | null;
       traffic_limit_price: number | null;
+      sku_row_id: number | null;
+      sku_code: string | null;
+      sku_id: string | null;
+      size_name: string | null;
+      specification_json: string | null;
+      lowest_supplier_price: number | null;
+      suggested_price: number | null;
     }>;
 
-    return {
-      spu: spu.spu,
-      skc_rows: skcs.map((skc) => ({
-        id: skc.id,
-        skc_code: skc.skc_code,
-        skc_id: skc.skc_id,
-        attribute_json: skc.attribute_json,
-        lowest_review_price: skc.lowest_review_price,
-        traffic_limit_price: skc.traffic_limit_price,
-        sku_rows: database
-          .prepare(
-            `SELECT sku_code, sku_id, size_name, specification_json,
-                    lowest_supplier_price, suggested_price
-             FROM temu_lifecycle_sku_current
-             WHERE skc_row_id = ? ORDER BY id`,
-          )
-          .all(skc.id) as LifecycleSkuRow[],
-      })),
-    };
-  });
+  const spuMap = new Map<number, LifecycleSpuRow>();
+  const skcMap = new Map<number, LifecycleSkcRow>();
+  for (const row of rows) {
+    let spu = spuMap.get(row.spu_row_id);
+    if (!spu) {
+      spu = { spu: row.spu, skc_rows: [] };
+      spuMap.set(row.spu_row_id, spu);
+    }
+    if (row.skc_row_id === null) continue;
+    let skc = skcMap.get(row.skc_row_id);
+    if (!skc) {
+      skc = {
+        id: row.skc_row_id,
+        skc_code: row.skc_code,
+        skc_id: row.skc_id,
+        attribute_json: row.attribute_json,
+        lowest_review_price: row.lowest_review_price,
+        traffic_limit_price: row.traffic_limit_price,
+        sku_rows: [],
+      };
+      skcMap.set(row.skc_row_id, skc);
+      spu.skc_rows.push(skc);
+    }
+    if (row.sku_row_id !== null) {
+      skc.sku_rows.push({
+        sku_code: row.sku_code,
+        sku_id: row.sku_id,
+        size_name: row.size_name,
+        specification_json: row.specification_json,
+        lowest_supplier_price: row.lowest_supplier_price,
+        suggested_price: row.suggested_price,
+      });
+    }
+  }
+  return [...spuMap.values()];
 }
 
 function skcDetail(
@@ -171,13 +192,11 @@ function skcDetail(
   };
 }
 
-export function lifecycleMatchForProduct(
-  shopId: number,
+function lifecycleMatchFromRows(
+  rows: LifecycleSpuRow[],
   productCode: string,
 ): ProductLifecycleMatch {
   if (!productCode.trim()) return emptyMatch();
-
-  const rows = lifecycleRowsForShop(shopId);
   const skcMatches: Array<{ row: LifecycleSpuRow; skc: LifecycleSkcRow }> = [];
   const skuMatches: Array<{
     row: LifecycleSpuRow;
@@ -291,6 +310,26 @@ export function lifecycleMatchForProduct(
     ),
     details,
   };
+}
+
+export function lifecycleMatchForProduct(
+  shopId: number,
+  productCode: string,
+): ProductLifecycleMatch {
+  return lifecycleMatchFromRows(lifecycleRowsForShop(shopId), productCode);
+}
+
+export function lifecycleMatchesForProducts(
+  shopId: number,
+  productCodes: string[],
+): Map<string, ProductLifecycleMatch> {
+  const rows = lifecycleRowsForShop(shopId);
+  return new Map(
+    [...new Set(productCodes)].map((productCode) => [
+      productCode,
+      lifecycleMatchFromRows(rows, productCode),
+    ]),
+  );
 }
 
 export function attachLifecycleMatch(

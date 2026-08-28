@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import signal
 import sys
 import threading
@@ -16,8 +17,27 @@ TEMU_HOME = "https://agentseller-us.temu.com/main/flux-analysis"
 LIFECYCLE_HOME = "https://agentseller.temu.com/newon/product-select"
 
 
+def json_safe(value: Any) -> Any:
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_safe(item) for item in value]
+    return value
+
+
 def emit(event: str, **payload: Any) -> None:
-    print(json.dumps({"event": event, **payload}, ensure_ascii=False), flush=True)
+    print(
+        json.dumps(
+            json_safe({"event": event, **payload}),
+            ensure_ascii=False,
+            allow_nan=False,
+        ),
+        flush=True,
+    )
 
 
 def run() -> int:
@@ -82,7 +102,7 @@ def run() -> int:
                         page_size=int(command.get("pageSize", 30)),
                         time_dimension=int(command.get("timeDimension", 1)),
                         progress=lambda item: emit(
-                            "traffic_page",
+                            item.pop("event", "traffic_page"),
                             syncId=command.get("syncId"),
                             **item,
                         ),
@@ -112,7 +132,7 @@ def run() -> int:
                         page,
                         page_size=int(command.get("pageSize", 50)),
                         progress=lambda item: emit(
-                            "lifecycle_page",
+                            item.pop("event", "lifecycle_page"),
                             syncId=command.get("syncId"),
                             **item,
                         ),

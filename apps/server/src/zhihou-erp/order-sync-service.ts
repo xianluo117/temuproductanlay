@@ -3,6 +3,11 @@ import type {
   ZhihouOrderSyncBatch,
 } from "@temu-analytics/shared";
 import { database } from "../database/index.js";
+import {
+  erpSkuImageKey,
+  lifecycleSkcImageKey,
+  queueImageTarget,
+} from "../import/image-association-service.js";
 import { getZhihouCredentials } from "./account-service.js";
 import {
   runZhihouWorker,
@@ -10,6 +15,7 @@ import {
   type ZhihouWorkerOrder,
   type ZhihouWorkerOrderItem,
 } from "./worker-client.js";
+import { findMatchedSkcImageTarget } from "./sku-match-service.js";
 
 interface SyncRow {
   id: number;
@@ -138,8 +144,9 @@ function commitSync(
     const insertItem = database.prepare(
       `INSERT INTO zhihou_new_order_items
         (sync_batch_id, order_id, external_item_key, zhihou_sku, product_name,
-         color, size, quantity, specification_image_url, main_image_url)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         color, size, quantity, specification_image_url, main_image_url,
+         image_target_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     let itemCount = 0;
     for (const order of orders) {
@@ -165,6 +172,7 @@ function commitSync(
           item.quantity,
           item.specificationImageUrl,
           item.mainImageUrl,
+          erpSkuImageKey(item.zhihouSku, syncId),
         );
         itemCount += 1;
       }
@@ -180,6 +188,40 @@ function commitSync(
   });
   commit();
   return getZhihouOrderSync(syncId);
+}
+
+function queueErpSpecificationImages(
+  syncId: number,
+  orders: ZhihouWorkerOrder[],
+): void {
+  for (const order of orders) {
+    for (const item of order.items) {
+      const imageUrl = item.specificationImageUrl ?? item.mainImageUrl;
+      if (!imageUrl) continue;
+      const target = findMatchedSkcImageTarget(item.zhihouSku);
+      if (target) {
+        queueImageTarget({
+          url: imageUrl,
+          targetType: "skc",
+          shopId: target.shopId,
+          targetKey: lifecycleSkcImageKey(target.skcRowId),
+          sourceType: "erp",
+          priority: 200,
+        });
+        continue;
+      }
+      const targetKey = erpSkuImageKey(item.zhihouSku, syncId);
+      if (!targetKey) continue;
+      queueImageTarget({
+        url: imageUrl,
+        targetType: "erp_sku",
+        shopId: null,
+        targetKey,
+        sourceType: "erp",
+        priority: 200,
+      });
+    }
+  }
 }
 
 function failSync(syncId: number, error: unknown): void {
@@ -204,7 +246,9 @@ export async function syncZhihouPendingOrders(
       action: "sync_pending_orders",
       ...credentials,
     });
-    return commitSync(syncId, result);
+    const sync = commitSync(syncId, result);
+    queueErpSpecificationImages(syncId, normalizedOrders(result.orders));
+    return sync;
   } catch (error) {
     failSync(syncId, error);
     throw error;
