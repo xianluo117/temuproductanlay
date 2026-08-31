@@ -9,6 +9,7 @@ import {
   restoreUploadedBackup,
   type BackupInfo,
 } from '../api/client';
+import { localDateTime } from '../utils/date-time';
 
 const { Title, Text } = Typography;
 const size = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -67,7 +68,7 @@ export function BackupsPage() {
 
   const columns = [
     { title: '类型', dataIndex: 'type', width: 90, render: (value: BackupInfo['type']) => <Tag color={typeLabels[value].color}>{typeLabels[value].text}</Tag> },
-    { title: '创建时间', dataIndex: 'createdAt', width: 190, render: (value: string) => new Date(value).toLocaleString('zh-CN') },
+    { title: '创建时间', dataIndex: 'createdAt', width: 190, render: (value: string) => localDateTime(value) },
     { title: '数据日期', render: (_: unknown, item: BackupInfo) => item.latestDataDate ? item.earliestDataDate === item.latestDataDate ? item.latestDataDate : `${item.earliestDataDate} 至 ${item.latestDataDate}` : '空数据状态' },
     { title: '数据概况', render: (_: unknown, item: BackupInfo) => `${item.metricRowCount} 条指标 / ${item.productCount} 个 SPU / ${item.importBatchCount} 个批次` },
     { title: '大小', dataIndex: 'byteSize', width: 100, render: size },
@@ -79,7 +80,7 @@ export function BackupsPage() {
     <Alert type="info" showIcon message="错误导入处理" description="若只是同一天数据有误，可重新上传正确文件覆盖；若日期或多天数据导错，可在下方选择导入前的自动备份恢复。恢复前系统会再次创建“恢复前”快照。" />
     <Card bordered={false} className="section-row"><Table rowKey="fileName" columns={columns} dataSource={items} scroll={{ x: 1050 }} /></Card>
     <Modal open={Boolean(restoring)} title="确认恢复到此备份" okText="确认恢复" okType="danger" cancelText="取消" confirmLoading={loading} onOk={restore} onCancel={() => setRestoring(null)}>
-      {restoring && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Alert type="warning" showIcon message="恢复会替换当前数据账号的业务数据" description="其他用户账号及其数据不会受到影响。系统会先自动创建当前账号的恢复前快照。" /><Text>备份类型：<Tag color={typeLabels[restoring.type].color}>{typeLabels[restoring.type].text}</Tag></Text><Text>创建时间：{new Date(restoring.createdAt).toLocaleString('zh-CN')}</Text><Text>数据范围：{restoring.latestDataDate ? `${restoring.earliestDataDate} 至 ${restoring.latestDataDate}` : '空数据状态'}</Text><Text>数据概况：{restoring.metricRowCount} 条指标，{restoring.productCount} 个 SPU</Text></Space>}
+      {restoring && <Space direction="vertical" size="middle" style={{ width: '100%' }}><Alert type="warning" showIcon message="恢复会替换当前数据账号的业务数据" description="其他用户账号及其数据不会受到影响。系统会先自动创建当前账号的恢复前快照。" /><Text>备份类型：<Tag color={typeLabels[restoring.type].color}>{typeLabels[restoring.type].text}</Tag></Text><Text>创建时间：{localDateTime(restoring.createdAt)}</Text><Text>数据范围：{restoring.latestDataDate ? `${restoring.earliestDataDate} 至 ${restoring.latestDataDate}` : '空数据状态'}</Text><Text>数据概况：{restoring.metricRowCount} 条指标，{restoring.productCount} 个 SPU</Text></Space>}
     </Modal>
   </div>;
 }

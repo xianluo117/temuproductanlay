@@ -39,6 +39,46 @@ body { font-family: Inter, "Microsoft YaHei", "PingFang SC", sans-serif; color: 
 .header-account { margin-left: auto; }
 .batch-operation-bar { margin-bottom: 16px; }
 .batch-failure-list { margin-bottom: 0 !important; white-space: pre-wrap; color: #b42318; }
+.business-data-table .ant-table { border-radius: 12px; overflow: hidden; }
+.business-data-table .ant-table-sticky-holder { z-index: 8; box-shadow: 0 8px 18px rgba(16,24,40,.09); }
+.business-data-table .ant-table-thead > tr > th { border-bottom: 1px solid rgba(71,84,103,.12); color: #263244; font-weight: 700; }
+.business-data-table .ant-table-tbody > tr > td { transition: background-color .16s ease; }
+.business-data-table .ant-table-tbody > tr:hover > td { filter: saturate(1.08) brightness(.985); }
+.business-data-table .data-column--identity { background: #f4f7fb; }
+.business-data-table .data-column--traffic { background: #f0f7ff; }
+.business-data-table .data-column--engagement { background: #f4f8ff; }
+.business-data-table .data-column--conversion { background: #f2faf5; }
+.business-data-table .data-column--cost { background: #fff8ed; }
+.business-data-table .data-column--review { background: #f7f3ff; }
+.business-data-table .data-column--campaign { background: #fff7f0; }
+.business-data-table .data-column--limit { background: #fff2f0; }
+.business-data-table .data-column--meta { background: #f8fafc; }
+.business-data-table .data-column--actions { background: #f5f7fa; }
+.business-data-table .ant-table-thead > tr > .data-column--identity { background: #e8eef6; }
+.business-data-table .ant-table-thead > tr > .data-column--traffic { background: #deedff; }
+.business-data-table .ant-table-thead > tr > .data-column--engagement { background: #e6efff; }
+.business-data-table .ant-table-thead > tr > .data-column--conversion { background: #e0f3e7; }
+.business-data-table .ant-table-thead > tr > .data-column--cost { background: #ffedcf; }
+.business-data-table .ant-table-thead > tr > .data-column--review { background: #ece4fb; }
+.business-data-table .ant-table-thead > tr > .data-column--campaign { background: #ffe9d8; }
+.business-data-table .ant-table-thead > tr > .data-column--limit { background: #ffe1dc; }
+.business-data-table .ant-table-thead > tr > .data-column--meta { background: #e9edf2; }
+.business-data-table .ant-table-thead > tr > .data-column--actions { background: #e3e8ef; }
+.business-data-table .ant-table-cell-fix-left,
+.business-data-table .ant-table-cell-fix-right { background-clip: padding-box; }
+.business-data-table .ant-tag { margin-inline-end: 0; }
+.inventory-matrix-card { overflow: hidden; }
+.inventory-matrix-card > .ant-card-head { min-height: 88px; padding: 12px 18px; background: linear-gradient(90deg, #fffaf7 0%, #fff 55%); }
+.inventory-matrix-card > .ant-card-head .ant-card-head-title { overflow: visible; white-space: normal; }
+.inventory-matrix-card > .ant-card-body { padding: 0; }
+.inventory-matrix-table .ant-table { border-radius: 0; }
+.inventory-matrix-table .ant-table-thead > tr > th { background: #f8fafc; text-align: center; }
+.inventory-matrix-table .ant-table-thead > tr > th:first-child { text-align: left; }
+.inventory-matrix-table .ant-table-tbody > tr > td { height: 72px; }
+.inventory-matrix-table .ant-table-tbody > tr > td:not(:first-child) { font-size: 16px; }
+.inventory-matrix-note { display: block; padding: 12px 18px 16px; white-space: pre-wrap; }
+.inventory-pagination { display: flex; justify-content: flex-end; padding-top: 2px; }
+.inventory-empty { padding: 72px 24px; color: #98a2b3; text-align: center; background: #fff; border: 1px dashed #d0d5dd; border-radius: 10px; }
 .comparison-control-card { background: linear-gradient(135deg, #fff 0%, #fff8f3 100%); border: 1px solid #ffeadf; }
 .comparison-help { display: block; margin-top: 12px; }
 .comparison-loading { min-height: 280px; display: grid; place-items: center; }

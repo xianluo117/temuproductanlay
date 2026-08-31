@@ -185,6 +185,20 @@ function commitSync(
          WHERE id = ? AND status = 'running'`,
       )
       .run(Math.max(0, Math.trunc(result.pageCount)), orders.length, itemCount, syncId);
+    database
+      .prepare(
+        `UPDATE zhihou_stock_order_snapshots
+         SET is_active = 0, last_seen_sync_batch_id = NULL,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE is_active = 1`,
+      )
+      .run();
+    const activateSnapshot = database.prepare(
+      `UPDATE zhihou_stock_order_snapshots
+       SET is_active = 1, last_seen_sync_batch_id = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE order_no = ?`,
+    );
+    for (const order of orders) activateSnapshot.run(syncId, order.orderNo);
   });
   commit();
   return getZhihouOrderSync(syncId);

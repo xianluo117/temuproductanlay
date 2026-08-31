@@ -9,6 +9,7 @@ import {
   type ProductManagementColumnKey,
   type ProductManagementRecord,
   type ProductManagementTrafficLimitSkc,
+  type Y2InventoryRecord,
   type ProductManagementRecordInput,
   type ProductManagementSettings,
   type ProductManagementSpuLink,
@@ -18,6 +19,7 @@ import {
   Card,
   Checkbox,
   Divider,
+  Drawer,
   Form,
   Image,
   Input,
@@ -39,6 +41,7 @@ import {
   errorMessage,
   getProductManagementRecord,
   getProductManagementRecords,
+  getY2Inventory,
   getProductManagementTrafficLimitSkcs,
   saveProductManagementColumnPreferences,
   saveProductManagementPageSize,
@@ -64,6 +67,7 @@ interface SearchValues {
 const columnLabels: Record<ProductManagementColumnKey, string> = {
   image: "图片",
   productCode: "货号",
+  y2Inventory: "Y2库存",
   serialNumber: "序列号",
   goodsValue: "货值",
   totalCost: "总成本",
@@ -138,6 +142,22 @@ function percent(value: number | null): string {
   return value === null ? "-" : `${(value * 100).toFixed(1)}%`;
 }
 
+function profitTag(value: number | null) {
+  if (value === null) return <Tag>缺失</Tag>;
+  return <Tag color={value >= 0.45 ? "green" : value >= 0.3 ? "orange" : "red"}>{percent(value)}</Tag>;
+}
+
+function productManagementColumnGroup(key: ProductManagementColumnKey | null | undefined): string {
+  if (key === null) return "actions";
+  if (["image", "productCode", "y2Inventory", "serialNumber"].includes(key ?? "")) return "identity";
+  if (["goodsValue", "totalCost", "profitThresholdPrice", "recommendedPrice"].includes(key ?? "")) return "cost";
+  if (["spu", "spuNote", "initialReviewPrice", "reviewPrice", "reviewProfitMargin"].includes(key ?? "")) return "review";
+  if (["suggestedActivityDiscount", "finalActivityDiscount", "activityPrice", "trafficPrice", "roas"].includes(key ?? "")) return "campaign";
+  if ((key ?? "").startsWith("trafficLimit")) return "limit";
+  if (key === "orderCount") return "conversion";
+  return "meta";
+}
+
 function toInput(
   record: ProductManagementRecord,
 ): ProductManagementRecordInput {
@@ -205,7 +225,8 @@ function ProductManagementImage({ row }: { row: ProductListRow }) {
 
 export function ProductManagementPage() {
   const { session } = useAuth();
-  const initialScope: Scope = session?.user.role === "admin" ? "shop" : "mine";
+  const isAdmin = session?.user.role === "admin";
+  const initialScope: Scope = "shop";
   const [scope, setScope] = useState<Scope>(initialScope);
   const [records, setRecords] = useState<ProductManagementRecord[]>([]);
   const [settings, setSettings] = useState<ProductManagementSettings>({
@@ -242,6 +263,8 @@ export function ProductManagementPage() {
   >([]);
   const [trafficLimitLoading, setTrafficLimitLoading] = useState(false);
   const [imageRefreshTick, setImageRefreshTick] = useState(0);
+  const [inventoryBinding, setInventoryBinding] = useState<Y2InventoryRecord | null>(null);
+  const [inventoryBindingLoading, setInventoryBindingLoading] = useState(false);
   const [form] = Form.useForm<ProductManagementRecordInput>();
   const [settingsForm] =
     Form.useForm<Omit<ProductManagementSettings, "updatedAt">>();
@@ -267,6 +290,7 @@ export function ProductManagementPage() {
       setLoading(false);
     }
   }, [appliedSearch, imageRefreshTick, messageApi, page, pageSize, scope]);
+
 
   useEffect(() => void reload(), [reload]);
 
@@ -360,6 +384,21 @@ export function ProductManagementPage() {
     }
   };
 
+  const openInventoryBinding = async (row: ProductListRow) => {
+    if (!row.y2Inventory) {
+      window.location.assign("/y2-inventory");
+      return;
+    }
+    setInventoryBindingLoading(true);
+    try {
+      setInventoryBinding(await getY2Inventory(row.y2Inventory.inventoryId));
+    } catch (error) {
+      messageApi.error(errorMessage(error));
+    } finally {
+      setInventoryBindingLoading(false);
+    }
+  };
+
   const saveColumnSettings = async () => {
     setColumnSettingsSaving(true);
     try {
@@ -397,6 +436,20 @@ export function ProductManagementPage() {
       },
       { title: "货号", dataIndex: "productCode", width: 180 },
       {
+        title: "Y2库存",
+        width: 150,
+        render: (_: unknown, row: ProductListRow) => row.y2Inventory ? (
+          <Space direction="vertical" size={2}>
+            <Tag color={row.y2Inventory.totalQuantity > 0 ? "blue" : "red"}>{row.y2Inventory.totalQuantity} 件</Tag>
+            {row.y2Inventory.unmatchedColorCount + row.y2Inventory.conflictColorCount > 0 ? (
+              <Tag color="orange">待处理 {row.y2Inventory.unmatchedColorCount + row.y2Inventory.conflictColorCount}</Tag>
+            ) : (
+              <Text type="secondary">已匹配 {row.y2Inventory.matchedColorCount}</Text>
+            )}
+          </Space>
+        ) : <Tag color="orange">未录入</Tag>,
+      },
+      {
         title: "序列号",
         dataIndex: "serialNumber",
         width: 90,
@@ -420,7 +473,7 @@ export function ProductManagementPage() {
         title: "SPU",
         dataIndex: ["spuLink", "spu"],
         width: 150,
-        render: (value: string | null) => value ?? "待补充",
+        render: (value: string | null) => value ?? <Tag color="orange">待补充</Tag>,
       },
       {
         title: "SPU备注",
@@ -445,7 +498,7 @@ export function ProductManagementPage() {
         title: "核价利润率",
         width: 110,
         render: (_: unknown, row: ProductListRow) =>
-          percent(row.spuLink?.reviewProfitMargin ?? null),
+          profitTag(row.spuLink?.reviewProfitMargin ?? null),
       },
       {
         title: "建议折扣",
@@ -479,14 +532,16 @@ export function ProductManagementPage() {
       {
         title: "限流价格",
         width: 100,
-        render: (_: unknown, row: ProductListRow) =>
-          money(row.spuLink?.trafficLimitPrice ?? null),
+        render: (_: unknown, row: ProductListRow) => {
+          const value = row.spuLink?.trafficLimitPrice ?? null;
+          return value === null ? <Text type="secondary">-</Text> : <Tag color="volcano">{money(value)}</Tag>;
+        },
       },
       {
         title: "限流利润率",
         width: 110,
         render: (_: unknown, row: ProductListRow) =>
-          percent(row.spuLink?.trafficLimitProfitMargin ?? null),
+          profitTag(row.spuLink?.trafficLimitProfitMargin ?? null),
       },
       {
         title: "限流建议折扣",
@@ -521,8 +576,12 @@ export function ProductManagementPage() {
       {
         title: "订单数量",
         width: 110,
-        render: (_: unknown, row: ProductListRow) =>
-          row.spuLink?.orderCount ?? "待订单模块补充",
+        render: (_: unknown, row: ProductListRow) => {
+          const value = row.spuLink?.orderCount;
+          return value === null || value === undefined
+            ? <Tag color="orange">待补充</Tag>
+            : <Tag color={value > 0 ? "green" : "default"}>{value}</Tag>;
+        },
       },
       {
         title: "进货链接",
@@ -542,7 +601,7 @@ export function ProductManagementPage() {
       {
         title: "操作",
         fixed: "right" as const,
-        width: 140,
+        width: 210,
         render: (_: unknown, row: ProductListRow) => (
           <Space wrap>
             <Button
@@ -562,6 +621,13 @@ export function ProductManagementPage() {
                   限流 SKC
                 </Button>
               )}
+            <Button
+              size="small"
+              loading={inventoryBindingLoading}
+              onClick={() => void openInventoryBinding(row)}
+            >
+              库存绑定
+            </Button>
             {row.canEdit ? (
               <>
                 <Button size="small" onClick={() => openEdit(row)}>
@@ -586,10 +652,15 @@ export function ProductManagementPage() {
         ),
       },
     ];
-    return allColumns.filter((_column, index) => {
-      const key = columnOrder[index];
-      return key === null || (key !== undefined && visibleColumns.includes(key));
-    });
+    return allColumns
+      .map((column, index) => {
+        const groupClass = `data-column data-column--${productManagementColumnGroup(columnOrder[index])}`;
+        return { ...column, className: groupClass, onHeaderCell: () => ({ className: groupClass }) };
+      })
+      .filter((_column, index) => {
+        const key = columnOrder[index];
+        return key === null || (key !== undefined && visibleColumns.includes(key));
+      });
   }, [detailLoading, reload, visibleColumns]);
 
   return (
@@ -599,21 +670,18 @@ export function ProductManagementPage() {
         <div>
           <Title level={2}>产品管理</Title>
           <Text type="secondary">
-            维护产品成本基础、多个 SPU / SKC / SKU 定价绑定
+            维护产品成本基础、多个 SPU / SKC / SKU 定价绑定；普通用户可查看已授权店铺的全部产品
           </Text>
         </div>
         <Space>
-          <Segmented
+          {isAdmin && <Segmented
             value={scope}
             onChange={(value) => {
               setPage(1);
               setScope(value as Scope);
             }}
-            options={[
-              { label: "我的数据", value: "mine" },
-              { label: "全店数据", value: "shop" },
-            ]}
-          />
+            options={[{ label: "全店数据", value: "shop" }, { label: "我的数据", value: "mine" }]}
+          />}
           <Button
             icon={<SettingOutlined />}
             onClick={() => {
@@ -623,7 +691,7 @@ export function ProductManagementPage() {
           >
             列表显示设置
           </Button>
-          {session?.user.role === "admin" && (
+          {isAdmin && (
             <Button
               icon={<SettingOutlined />}
               onClick={() => {
@@ -755,6 +823,8 @@ export function ProductManagementPage() {
       </Card>
       <Card bordered={false}>
         <Table<ProductListRow>
+          className="business-data-table product-management-table"
+          sticky={{ offsetHeader: 64 }}
           loading={loading}
           rowKey="rowKey"
           columns={columns}
@@ -795,6 +865,58 @@ export function ProductManagementPage() {
         items={trafficLimitSkcs}
         onClose={() => setTrafficLimitRow(null)}
       />
+
+      <Drawer
+        title={`Y2库存绑定 · ${inventoryBinding?.productCode ?? ""} · ${inventoryBinding?.spu ?? "待绑定SPU"}`}
+        open={Boolean(inventoryBinding)}
+        onClose={() => setInventoryBinding(null)}
+        width={980}
+        extra={<Button type="primary" onClick={() => window.location.assign(`/y2-inventory?inventoryId=${inventoryBinding?.id ?? ""}`)}>编辑库存绑定</Button>}
+      >
+        {inventoryBinding && (
+          <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+            <Space align="start" wrap>
+              {inventoryBinding.imageUrl ? <Image src={inventoryBinding.imageUrl} width={100} height={100} style={{ objectFit: "cover" }} /> : null}
+              <Space direction="vertical">
+                <Text strong>{inventoryBinding.productCode}</Text>
+                <Text>SPU：{inventoryBinding.spu ?? "待后续绑定"}</Text>
+                <Text type="secondary">备注：{inventoryBinding.note ?? "-"}</Text>
+              </Space>
+            </Space>
+            <Space wrap>
+              <Tag color="blue">总库存 {inventoryBinding.totalQuantity}</Tag>
+              <Tag color="success">已匹配颜色 {inventoryBinding.matchedColorCount}</Tag>
+              <Tag color={inventoryBinding.unmatchedColorCount ? "warning" : "default"}>未匹配 {inventoryBinding.unmatchedColorCount}</Tag>
+              <Tag color={inventoryBinding.conflictColorCount ? "error" : "default"}>冲突 {inventoryBinding.conflictColorCount}</Tag>
+            </Space>
+            <Table
+              rowKey="id"
+              pagination={false}
+              bordered
+              dataSource={inventoryBinding.colors}
+              scroll={{ x: Math.max(720, 300 + inventoryBinding.sizes.length * 110) }}
+              columns={[
+                {
+                  title: "颜色 / SKC",
+                  fixed: "left",
+                  width: 240,
+                  render: (_value: unknown, color: Y2InventoryRecord["colors"][number]) => <Space>{color.imageUrl ? <Image src={color.imageUrl} width={42} height={42} /> : null}<Space direction="vertical" size={0}><Text strong>{color.color}</Text><Text type="secondary">{color.skcCode ?? color.matchMessage ?? "未绑定"}</Text></Space></Space>,
+                },
+                ...inventoryBinding.sizes.map((size) => ({
+                  title: size,
+                  width: 110,
+                  align: "center" as const,
+                  render: (_value: unknown, color: Y2InventoryRecord["colors"][number]) => {
+                    const cell = color.cells.find((item) => item.size === size);
+                    return cell ? <Tooltip title={cell.matchMessage ?? cell.skuCode ?? cell.skuId ?? "已匹配"}><Tag color={cell.matchStatus === "matched" ? "success" : cell.matchStatus === "conflict" ? "error" : "warning"}>{cell.quantity}</Tag></Tooltip> : "-";
+                  },
+                })),
+                { title: "合计", dataIndex: "totalQuantity", fixed: "right", width: 90 },
+              ]}
+            />
+          </Space>
+        )}
+      </Drawer>
 
       <Modal
         title={editing ? "编辑产品主档" : "新增产品主档"}

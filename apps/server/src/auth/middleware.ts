@@ -63,6 +63,11 @@ export function activeShopId(request: Request): number {
   return (request as AuthenticatedRequest).auth.activeShop.id;
 }
 
+export function isAuthorizedShop(request: Request, shopId: number): boolean {
+  const authenticated = request as AuthenticatedRequest;
+  return authenticated.auth.user.role === "admin" || authenticated.auth.availableShops.some((shop) => shop.id === shopId);
+}
+
 export function authenticatedUser(request: Request): AuthSession["user"] {
   return (request as AuthenticatedRequest).auth.user;
 }

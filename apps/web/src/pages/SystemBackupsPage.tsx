@@ -9,6 +9,7 @@ import {
   restoreUploadedSystemBackup,
   type BackupInfo,
 } from '../api/client';
+import { localDateTime } from '../utils/date-time';
 
 const { Title, Text } = Typography;
 const size = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -35,7 +36,7 @@ export function SystemBackupsPage() {
   };
   const columns = [
     { title: '类型', dataIndex: 'type', render: (value: BackupInfo['type']) => <Tag color={typeLabels[value].color}>{typeLabels[value].text}</Tag> },
-    { title: '创建时间', dataIndex: 'createdAt', render: (value: string) => new Date(value).toLocaleString('zh-CN') },
+    { title: '创建时间', dataIndex: 'createdAt', render: (value: string) => localDateTime(value) },
     { title: '数据概况', render: (_: unknown, item: BackupInfo) => `${item.metricRowCount} 条指标 / ${item.productCount} 个 SPU / ${item.importBatchCount} 个批次` },
     { title: '大小', dataIndex: 'byteSize', render: size },
     { title: '操作', render: (_: unknown, item: BackupInfo) => <Space><Button icon={<CloudDownloadOutlined />} href={`/api/backups/${encodeURIComponent(item.fileName)}/download`}>下载</Button><Button danger icon={<HistoryOutlined />} onClick={() => setRestoring(item)}>恢复</Button></Space> },

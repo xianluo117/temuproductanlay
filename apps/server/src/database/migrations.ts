@@ -576,6 +576,389 @@ export function migrateZhihouErp(database: Database.Database): void {
       ON zhihou_new_order_items(sync_batch_id, zhihou_sku);
     CREATE INDEX IF NOT EXISTS idx_zhihou_items_order
       ON zhihou_new_order_items(order_id, id);
+
+    CREATE TABLE IF NOT EXISTS zhihou_stock_pick_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_by_user_id INTEGER NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS zhihou_stock_pick_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL,
+      target_key TEXT NOT NULL,
+      parent_spu TEXT,
+      target_zhihou_sku TEXT NOT NULL,
+      target_color TEXT NOT NULL,
+      target_size TEXT NOT NULL,
+      inventory_cell_id INTEGER NOT NULL,
+      source_color TEXT NOT NULL,
+      source_size TEXT NOT NULL,
+      picked_quantity INTEGER NOT NULL CHECK (picked_quantity > 0),
+      matched_quantity INTEGER NOT NULL DEFAULT 0
+        CHECK (matched_quantity >= 0 AND matched_quantity <= picked_quantity),
+      adjusted_quantity INTEGER NOT NULL DEFAULT 0
+        CHECK (adjusted_quantity >= 0 AND adjusted_quantity <= picked_quantity),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (batch_id) REFERENCES zhihou_stock_pick_batches(id) ON DELETE CASCADE,
+      FOREIGN KEY (inventory_cell_id) REFERENCES y2_inventory_cells(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_zhihou_pick_items_target
+      ON zhihou_stock_pick_items(target_key, created_at, id);
+    CREATE INDEX IF NOT EXISTS idx_zhihou_pick_items_inventory
+      ON zhihou_stock_pick_items(inventory_cell_id, id);
+
+    CREATE TABLE IF NOT EXISTS zhihou_stock_order_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_no TEXT NOT NULL UNIQUE,
+      submitted_at TEXT,
+      store_name TEXT,
+      country_code TEXT,
+      required_quantity INTEGER NOT NULL CHECK (required_quantity >= 0),
+      is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+      last_seen_sync_batch_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS zhihou_stock_order_item_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_snapshot_id INTEGER NOT NULL,
+      external_item_key TEXT NOT NULL UNIQUE,
+      target_key TEXT NOT NULL,
+      target_zhihou_sku TEXT NOT NULL,
+      target_color TEXT NOT NULL,
+      target_size TEXT NOT NULL,
+      required_quantity INTEGER NOT NULL CHECK (required_quantity >= 0),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (order_snapshot_id) REFERENCES zhihou_stock_order_snapshots(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_zhihou_order_item_snapshot_target
+      ON zhihou_stock_order_item_snapshots(target_key, id);
+
+    CREATE TABLE IF NOT EXISTS zhihou_stock_pick_allocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pick_item_id INTEGER NOT NULL,
+      order_item_snapshot_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(pick_item_id, order_item_snapshot_id),
+      FOREIGN KEY (pick_item_id) REFERENCES zhihou_stock_pick_items(id) ON DELETE CASCADE,
+      FOREIGN KEY (order_item_snapshot_id) REFERENCES zhihou_stock_order_item_snapshots(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_zhihou_pick_allocations_order_item
+      ON zhihou_stock_pick_allocations(order_item_snapshot_id, id);
+
+    CREATE TABLE IF NOT EXISTS zhihou_size_conversion_options (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target_key TEXT NOT NULL,
+      target_size TEXT NOT NULL,
+      inventory_cell_id INTEGER NOT NULL,
+      source_size TEXT NOT NULL,
+      created_by_user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(target_key, inventory_cell_id),
+      FOREIGN KEY (inventory_cell_id) REFERENCES y2_inventory_cells(id) ON DELETE CASCADE,
+      FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_zhihou_conversion_target
+      ON zhihou_size_conversion_options(target_key, id);
+
+    CREATE TABLE IF NOT EXISTS zhihou_inventory_adjustment_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pick_item_id INTEGER NOT NULL UNIQUE,
+      inventory_cell_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      before_quantity INTEGER NOT NULL CHECK (before_quantity >= 0),
+      after_quantity INTEGER NOT NULL CHECK (after_quantity >= 0),
+      adjusted_by_user_id INTEGER NOT NULL,
+      adjusted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (pick_item_id) REFERENCES zhihou_stock_pick_items(id) ON DELETE RESTRICT,
+      FOREIGN KEY (inventory_cell_id) REFERENCES y2_inventory_cells(id) ON DELETE RESTRICT,
+      FOREIGN KEY (adjusted_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_zhihou_inventory_adjustments_time
+       ON zhihou_inventory_adjustment_logs(adjusted_at DESC, id DESC);
+   `);
+   if (!hasColumn(database, "zhihou_stock_order_snapshots", "is_active")) {
+     database.exec(
+       "ALTER TABLE zhihou_stock_order_snapshots ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1))",
+     );
+   }
+   if (!hasColumn(database, "zhihou_stock_order_snapshots", "last_seen_sync_batch_id")) {
+     database.exec(
+       "ALTER TABLE zhihou_stock_order_snapshots ADD COLUMN last_seen_sync_batch_id INTEGER",
+     );
+   }
+ }
+
+export function migrateY2Inventory(database: Database.Database): void {
+  const productColumns = database
+    .prepare("PRAGMA table_info(y2_inventory_products)")
+    .all() as Array<{ name: string; notnull: number }>;
+  if (productColumns.some((column) => column.name === "product_code" && column.notnull === 1)) {
+    database.pragma("foreign_keys = OFF");
+    database.pragma("legacy_alter_table = ON");
+    database.exec(`
+      ALTER TABLE y2_inventory_products RENAME TO y2_inventory_products_legacy;
+      CREATE TABLE y2_inventory_products (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_management_record_id INTEGER,
+        product_code TEXT COLLATE NOCASE,
+        spu TEXT,
+        image_asset_id INTEGER,
+        note TEXT,
+        sizes_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (product_management_record_id) REFERENCES product_management_records(id) ON DELETE SET NULL,
+        FOREIGN KEY (image_asset_id) REFERENCES image_assets(id) ON DELETE SET NULL
+      );
+      INSERT INTO y2_inventory_products
+        (id, product_management_record_id, product_code, spu, image_asset_id, note, sizes_json, created_at, updated_at)
+      SELECT id, product_management_record_id, product_code, spu, image_asset_id, note, sizes_json, created_at, updated_at
+      FROM y2_inventory_products_legacy;
+      DROP TABLE y2_inventory_products_legacy;
+      CREATE INDEX idx_y2_inventory_product_code ON y2_inventory_products(product_code);
+      CREATE INDEX idx_y2_inventory_product_record ON y2_inventory_products(product_management_record_id);
+    `);
+    database.pragma("legacy_alter_table = OFF");
+    database.pragma("foreign_keys = ON");
+  }
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS y2_inventory_products (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_management_record_id INTEGER,
+      product_code TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(trim(product_code)) > 0),
+      spu TEXT,
+      image_asset_id INTEGER,
+      note TEXT,
+      sizes_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (product_management_record_id) REFERENCES product_management_records(id) ON DELETE SET NULL,
+      FOREIGN KEY (image_asset_id) REFERENCES image_assets(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_product_code
+      ON y2_inventory_products(product_code);
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_product_record
+      ON y2_inventory_products(product_management_record_id);
+
+    CREATE TABLE IF NOT EXISTS y2_inventory_colors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inventory_product_id INTEGER NOT NULL,
+      color_name TEXT NOT NULL CHECK (length(trim(color_name)) > 0),
+      normalized_color TEXT NOT NULL,
+      skc_row_id INTEGER,
+      skc_id TEXT,
+      skc_code TEXT,
+      match_status TEXT NOT NULL DEFAULT 'unmatched'
+        CHECK (match_status IN ('matched', 'unmatched', 'conflict')),
+      match_message TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(inventory_product_id, normalized_color),
+      FOREIGN KEY (inventory_product_id) REFERENCES y2_inventory_products(id) ON DELETE CASCADE,
+      FOREIGN KEY (skc_row_id) REFERENCES temu_lifecycle_skc_current(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_colors_skc
+      ON y2_inventory_colors(skc_row_id);
+
+    CREATE TABLE IF NOT EXISTS y2_inventory_cells (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      color_row_id INTEGER NOT NULL,
+      size_name TEXT NOT NULL CHECK (length(trim(size_name)) > 0),
+      normalized_size TEXT NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+      sku_row_id INTEGER,
+      sku_id TEXT,
+      sku_code TEXT,
+      match_status TEXT NOT NULL DEFAULT 'unmatched'
+        CHECK (match_status IN ('matched', 'unmatched', 'conflict')),
+      match_message TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(color_row_id, normalized_size),
+      FOREIGN KEY (color_row_id) REFERENCES y2_inventory_colors(id) ON DELETE CASCADE,
+      FOREIGN KEY (sku_row_id) REFERENCES temu_lifecycle_sku_current(id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_cells_sku
+      ON y2_inventory_cells(sku_row_id);
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_cells_sku_identity
+      ON y2_inventory_cells(sku_id, sku_code);
+
+    CREATE TABLE IF NOT EXISTS y2_inventory_product_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inventory_product_id INTEGER NOT NULL,
+      product_code TEXT NOT NULL CHECK (length(trim(product_code)) > 0),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(inventory_product_id, product_code),
+      FOREIGN KEY (inventory_product_id) REFERENCES y2_inventory_products(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_y2_inventory_product_codes_value
+      ON y2_inventory_product_codes(UPPER(TRIM(product_code)));
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_product_codes_product
+      ON y2_inventory_product_codes(inventory_product_id);
+
+    CREATE TABLE IF NOT EXISTS y2_inventory_product_spus (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inventory_product_id INTEGER NOT NULL,
+      spu TEXT NOT NULL CHECK (length(trim(spu)) > 0),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(inventory_product_id, spu),
+      FOREIGN KEY (inventory_product_id) REFERENCES y2_inventory_products(id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_y2_inventory_product_spus_value
+      ON y2_inventory_product_spus(UPPER(TRIM(spu)));
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_product_spus_product
+      ON y2_inventory_product_spus(inventory_product_id);
+
+    CREATE TABLE IF NOT EXISTS y2_inventory_product_spu_specs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_spu_id INTEGER NOT NULL,
+      color_row_id INTEGER NOT NULL,
+      cell_id INTEGER,
+      skc_row_id INTEGER,
+      sku_row_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(product_spu_id, color_row_id, cell_id),
+      FOREIGN KEY (product_spu_id) REFERENCES y2_inventory_product_spus(id) ON DELETE CASCADE,
+      FOREIGN KEY (color_row_id) REFERENCES y2_inventory_colors(id) ON DELETE CASCADE,
+      FOREIGN KEY (cell_id) REFERENCES y2_inventory_cells(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_product_spu_specs_color
+      ON y2_inventory_product_spu_specs(color_row_id, product_spu_id);
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_product_spu_specs_cell
+      ON y2_inventory_product_spu_specs(cell_id, product_spu_id);
+
+    CREATE TABLE IF NOT EXISTS y2_inventory_change_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      inventory_product_id INTEGER,
+      product_code TEXT NOT NULL,
+      action TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
+      changed_by_user_id INTEGER NOT NULL,
+      before_total_quantity INTEGER,
+      after_total_quantity INTEGER,
+      before_json TEXT,
+      after_json TEXT,
+      changed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (changed_by_user_id) REFERENCES users(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_y2_inventory_logs_changed
+      ON y2_inventory_change_logs(changed_at DESC, id DESC);
+  `);
+  const staleTables = [
+    "y2_inventory_colors",
+    "y2_inventory_product_codes",
+    "y2_inventory_product_spus",
+    "y2_inventory_product_spu_specs",
+  ].filter((table) => {
+    const row = database
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table) as { sql: string | null } | undefined;
+    return row?.sql?.includes("y2_inventory_products_legacy") ?? false;
+  });
+  if (staleTables.length) {
+    database.pragma("foreign_keys = OFF");
+    database.pragma("legacy_alter_table = ON");
+    for (const table of staleTables) {
+      const staleTable = `${table}_stale`;
+      database.exec(`ALTER TABLE ${table} RENAME TO ${staleTable};`);
+      if (table === "y2_inventory_colors") {
+        database.exec(`
+          CREATE TABLE y2_inventory_colors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inventory_product_id INTEGER NOT NULL,
+            color_name TEXT NOT NULL CHECK (length(trim(color_name)) > 0),
+            normalized_color TEXT NOT NULL,
+            skc_row_id INTEGER,
+            skc_id TEXT,
+            skc_code TEXT,
+            match_status TEXT NOT NULL DEFAULT 'unmatched'
+              CHECK (match_status IN ('matched', 'unmatched', 'conflict')),
+            match_message TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(inventory_product_id, normalized_color),
+            FOREIGN KEY (inventory_product_id) REFERENCES y2_inventory_products(id) ON DELETE CASCADE,
+            FOREIGN KEY (skc_row_id) REFERENCES temu_lifecycle_skc_current(id) ON DELETE SET NULL
+          );
+          INSERT INTO y2_inventory_colors
+            (id, inventory_product_id, color_name, normalized_color, skc_row_id, skc_id,
+             skc_code, match_status, match_message, sort_order, created_at, updated_at)
+          SELECT id, inventory_product_id, color_name, normalized_color, skc_row_id, skc_id,
+                 skc_code, match_status, match_message, sort_order, created_at, updated_at
+          FROM y2_inventory_colors_stale;
+          DROP TABLE y2_inventory_colors_stale;
+        `);
+      } else if (table === "y2_inventory_product_codes") {
+        database.exec(`
+          CREATE TABLE y2_inventory_product_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inventory_product_id INTEGER NOT NULL,
+            product_code TEXT NOT NULL CHECK (length(trim(product_code)) > 0),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(inventory_product_id, product_code),
+            FOREIGN KEY (inventory_product_id) REFERENCES y2_inventory_products(id) ON DELETE CASCADE
+          );
+          INSERT OR IGNORE INTO y2_inventory_product_codes
+            (id, inventory_product_id, product_code, created_at)
+          SELECT id, inventory_product_id, product_code, created_at
+          FROM y2_inventory_product_codes_stale;
+          DROP TABLE y2_inventory_product_codes_stale;
+        `);
+      } else if (table === "y2_inventory_product_spus") {
+        database.exec(`
+          CREATE TABLE y2_inventory_product_spus (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inventory_product_id INTEGER NOT NULL,
+            spu TEXT NOT NULL CHECK (length(trim(spu)) > 0),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(inventory_product_id, spu),
+            FOREIGN KEY (inventory_product_id) REFERENCES y2_inventory_products(id) ON DELETE CASCADE
+          );
+          INSERT OR IGNORE INTO y2_inventory_product_spus
+            (id, inventory_product_id, spu, created_at)
+          SELECT id, inventory_product_id, spu, created_at
+          FROM y2_inventory_product_spus_stale;
+          DROP TABLE y2_inventory_product_spus_stale;
+        `);
+      } else if (table === "y2_inventory_product_spu_specs") {
+        database.exec(`DROP TABLE IF EXISTS ${staleTable};`);
+      } else {
+        database.exec(`DROP TABLE IF EXISTS ${staleTable};`);
+      }
+    }
+    database.pragma("legacy_alter_table = OFF");
+    database.pragma("foreign_keys = ON");
+  }
+  database.exec(`
+    INSERT OR IGNORE INTO y2_inventory_product_codes (inventory_product_id, product_code)
+    SELECT id, product_code FROM y2_inventory_products
+    WHERE TRIM(COALESCE(product_code, '')) <> '';
+    INSERT OR IGNORE INTO y2_inventory_product_spus (inventory_product_id, spu)
+    SELECT id, spu FROM y2_inventory_products
+    WHERE TRIM(COALESCE(spu, '')) <> '';
+  `);
+  if (!hasColumn(database, "y2_inventory_products", "image_asset_id")) {
+    database.exec(
+      "ALTER TABLE y2_inventory_products ADD COLUMN image_asset_id INTEGER REFERENCES image_assets(id)",
+    );
+  }
+  if (!hasColumn(database, "y2_inventory_products", "note")) {
+    database.exec("ALTER TABLE y2_inventory_products ADD COLUMN note TEXT");
+  }
+  database.exec(`
+    DELETE FROM y2_inventory_change_logs
+    WHERE changed_at < datetime('now', '-7 days');
   `);
 }
 

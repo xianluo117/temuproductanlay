@@ -11,6 +11,11 @@ const { RangePicker } = DatePicker;
 const percent = (value: number | null) => value === null ? '-' : `${(value * 100).toFixed(2)}%`;
 const compareNullable = (left: number | null, right: number | null) => left === null ? right === null ? 0 : -1 : right === null ? 1 : left - right;
 
+function rateTag(value: number | null, healthyRate: number) {
+  if (value === null) return <Tag>缺失</Tag>;
+  return <Tag color={value >= healthyRate ? 'green' : value > 0 ? 'orange' : 'default'}>{percent(value)}</Tag>;
+}
+
 type ProductMetricKey = 'impressions' | 'clicks' | 'visitors';
 type PaymentMetricKey = 'orders' | 'detailPaidBuyers' | 'detailPaymentConversionRate' | 'impressionOrderConversionRate';
 interface FilterState { listedRange: [Dayjs, Dayjs] | null; productMetric: ProductMetricKey; productMin: number | null; productMax: number | null; paymentMetric: PaymentMetricKey; paymentMin: number | null; paymentMax: number | null }
@@ -78,21 +83,29 @@ export function ProductsPage() {
     } finally { setBatchSaving(false); }
   };
 
-  const columns = useMemo(() => [
-    { title: '图片', width: 86, render: (_: unknown, item: ProductSummary) => item.imageUrl ? <Image src={item.imageUrl} width={58} height={58} /> : <div className="image-placeholder large" /> },
-    { title: 'SPU', dataIndex: 'spu', fixed: 'left' as const, render: (value: string) => <Link to={`/products/${value}`}>{value}</Link> },
-    { title: '加入站点', dataIndex: 'firstListedAt', render: (value: string | null) => value ?? '-' },
-    { title: '曝光', dataIndex: 'impressions', sorter: (a: ProductSummary, b: ProductSummary) => a.impressions - b.impressions },
-    { title: '搜索曝光', dataIndex: 'searchImpressions', sorter: (a: ProductSummary, b: ProductSummary) => a.searchImpressions - b.searchImpressions },
-    { title: '点击', dataIndex: 'clicks', sorter: (a: ProductSummary, b: ProductSummary) => a.clicks - b.clicks },
-    { title: '点击率', dataIndex: 'clickThroughRate', render: percent, sorter: (a: ProductSummary, b: ProductSummary) => compareNullable(a.clickThroughRate, b.clickThroughRate) },
-    { title: '访客', dataIndex: 'visitors' }, { title: '加购', dataIndex: 'cartUsers' },
-    { title: '加购率', dataIndex: 'cartRate', render: percent },
-    { title: '订单', dataIndex: 'orders', sorter: (a: ProductSummary, b: ProductSummary) => a.orders - b.orders, render: (value: number) => <Tag color={value > 0 ? 'green' : 'default'}>{value}</Tag> },
-    { title: '支付买家', dataIndex: 'detailPaidBuyers' },
-    { title: '商详支付转化', dataIndex: 'detailPaymentConversionRate', render: percent, sorter: (a: ProductSummary, b: ProductSummary) => compareNullable(a.detailPaymentConversionRate, b.detailPaymentConversionRate) },
-    { title: '曝光订单转化', dataIndex: 'impressionOrderConversionRate', render: percent, sorter: (a: ProductSummary, b: ProductSummary) => compareNullable(a.impressionOrderConversionRate, b.impressionOrderConversionRate) },
-  ], []);
+  const columns = useMemo(() => {
+    const columnGroups = ['identity', 'identity', 'identity', 'traffic', 'traffic', 'engagement', 'engagement', 'engagement', 'engagement', 'engagement', 'conversion', 'conversion', 'conversion', 'conversion'];
+    const baseColumns = [
+      { key: 'image', title: '图片', width: 86, render: (_: unknown, item: ProductSummary) => item.imageUrl ? <Image src={item.imageUrl} width={58} height={58} /> : <div className="image-placeholder large" /> },
+      { key: 'spu', title: 'SPU', dataIndex: 'spu', fixed: 'left' as const, render: (value: string) => <Link to={`/products/${value}`}>{value}</Link> },
+      { key: 'firstListedAt', title: '加入站点', dataIndex: 'firstListedAt', render: (value: string | null) => value ?? <Tag color="orange">待补充</Tag> },
+      { key: 'impressions', title: '曝光', dataIndex: 'impressions', sorter: (a: ProductSummary, b: ProductSummary) => a.impressions - b.impressions },
+      { key: 'searchImpressions', title: '搜索曝光', dataIndex: 'searchImpressions', sorter: (a: ProductSummary, b: ProductSummary) => a.searchImpressions - b.searchImpressions },
+      { key: 'clicks', title: '点击', dataIndex: 'clicks', sorter: (a: ProductSummary, b: ProductSummary) => a.clicks - b.clicks },
+      { key: 'clickThroughRate', title: '点击率', dataIndex: 'clickThroughRate', render: (value: number | null) => rateTag(value, 0.05), sorter: (a: ProductSummary, b: ProductSummary) => compareNullable(a.clickThroughRate, b.clickThroughRate) },
+      { key: 'visitors', title: '访客', dataIndex: 'visitors' },
+      { key: 'cartUsers', title: '加购', dataIndex: 'cartUsers' },
+      { key: 'cartRate', title: '加购率', dataIndex: 'cartRate', render: (value: number | null) => rateTag(value, 0.08) },
+      { key: 'orders', title: '订单', dataIndex: 'orders', sorter: (a: ProductSummary, b: ProductSummary) => a.orders - b.orders, render: (value: number) => <Tag color={value > 0 ? 'green' : 'default'}>{value}</Tag> },
+      { key: 'detailPaidBuyers', title: '支付买家', dataIndex: 'detailPaidBuyers' },
+      { key: 'detailPaymentConversionRate', title: '商详支付转化', dataIndex: 'detailPaymentConversionRate', render: (value: number | null) => rateTag(value, 0.1), sorter: (a: ProductSummary, b: ProductSummary) => compareNullable(a.detailPaymentConversionRate, b.detailPaymentConversionRate) },
+      { key: 'impressionOrderConversionRate', title: '曝光订单转化', dataIndex: 'impressionOrderConversionRate', render: (value: number | null) => rateTag(value, 0.01), sorter: (a: ProductSummary, b: ProductSummary) => compareNullable(a.impressionOrderConversionRate, b.impressionOrderConversionRate) },
+    ];
+    return baseColumns.map((column, index) => {
+      const groupClass = `data-column data-column--${columnGroups[index]}`;
+      return { ...column, className: groupClass, onHeaderCell: () => ({ className: groupClass }) };
+    });
+  }, []);
   const paymentIsRate = draftFilters.paymentMetric === 'detailPaymentConversionRate' || draftFilters.paymentMetric === 'impressionOrderConversionRate';
 
   return <div>{messageContext}
@@ -106,7 +119,7 @@ export function ProductsPage() {
       </Row>
       <Space className="filter-actions"><Button type="primary" onClick={() => setFilters(draftFilters)}>查询</Button><Button onClick={resetFilters}>重置</Button><Text type="secondary">当前显示 {filteredProducts.length} / {products.length} 个 SPU</Text></Space>
     </Card>
-    <Card bordered={false} className="section-row"><Space className="batch-operation-bar"><Text>已选择 {selectedSpus.length} 个 SPU</Text><Button type="primary" disabled={selectedSpus.length === 0} onClick={openBatch}>批量添加操作记录</Button><Button disabled={selectedSpus.length === 0} onClick={() => setSelectedSpus([])}>清空选择</Button></Space><Table loading={loading} rowKey="spu" rowSelection={{ selectedRowKeys: selectedSpus, preserveSelectedRowKeys: true, onChange: setSelectedSpus }} columns={columns} dataSource={filteredProducts} pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 1500 }} /></Card>
+    <Card bordered={false} className="section-row"><Space className="batch-operation-bar"><Text>已选择 {selectedSpus.length} 个 SPU</Text><Button type="primary" disabled={selectedSpus.length === 0} onClick={openBatch}>批量添加操作记录</Button><Button disabled={selectedSpus.length === 0} onClick={() => setSelectedSpus([])}>清空选择</Button></Space><Table className="business-data-table spu-data-table" sticky={{ offsetHeader: 64 }} loading={loading} rowKey="spu" rowSelection={{ selectedRowKeys: selectedSpus, preserveSelectedRowKeys: true, onChange: setSelectedSpus }} columns={columns} dataSource={filteredProducts} pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 1500 }} /></Card>
     <Modal title="批量添加 SPU 操作记录" open={batchOpen} onCancel={() => setBatchOpen(false)} onOk={() => void saveBatch()} confirmLoading={batchSaving} okText="批量保存" width={680}>
       <Text type="secondary">将为当前选择的 {selectedSpus.length} 个 SPU 添加相同记录。</Text>
       <Form form={batchForm} layout="vertical" className="operation-form"><Form.Item name="operatedAt" label="操作时间" rules={[{ required: true }]}><DatePicker showTime style={{ width: '100%' }} /></Form.Item><Form.Item name="content" label="操作内容" rules={[{ required: true, whitespace: true }, { max: 1000 }]}><Input.TextArea rows={4} /></Form.Item><Form.Item name="note" label="备注" rules={[{ max: 3000 }]}><Input.TextArea rows={3} /></Form.Item></Form>

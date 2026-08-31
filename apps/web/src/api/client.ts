@@ -39,13 +39,26 @@ import type {
   TemuTrafficSyncActionResult,
   TemuTrafficSyncStatus,
   UserAccount,
+  Y2InventoryBindingOptions,
+  Y2InventoryChangeLog,
+  Y2InventoryImageUploadResult,
+  Y2InventoryListResponse,
+  Y2InventoryRecord,
+  Y2InventoryRecordInput,
   ZhihouAccount,
   ZhihouAccountInput,
+  ZhihouBatchStockPickInput,
+  ZhihouBatchStockPickPreview,
+  ZhihouBatchStockPickResult,
+  ZhihouInventoryAdjustmentResult,
   ZhihouLoginTestResult,
   ZhihouOrderReferencesResponse,
   ZhihouOrderSummaryResponse,
   ZhihouOrderSyncBatch,
   ZhihouSkuMatchStatus,
+  ZhihouStockMatchResult,
+  ZhihouStockPickDashboard,
+  ZhihouStockPickInput,
 } from "@temu-analytics/shared";
 import axios from "axios";
 
@@ -147,6 +160,50 @@ export async function getProducts(
   ).data.data;
 }
 
+export async function uploadY2InventoryImage(file: File): Promise<Y2InventoryImageUploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  return (
+    await http.post<ApiResponse<Y2InventoryImageUploadResult>>("/y2-inventory/image", form)
+  ).data.data;
+}
+
+export async function getY2InventoryChangeLogs(): Promise<Y2InventoryChangeLog[]> {
+  return (await http.get<ApiResponse<Y2InventoryChangeLog[]>>("/y2-inventory/logs")).data.data;
+}
+
+export async function getY2InventoryList(search?: string): Promise<Y2InventoryListResponse> {
+  return (
+    await http.get<ApiResponse<Y2InventoryListResponse>>("/y2-inventory", {
+      params: { search },
+    })
+  ).data.data;
+}
+
+export async function getY2Inventory(id: number): Promise<Y2InventoryRecord> {
+  return (await http.get<ApiResponse<Y2InventoryRecord>>(`/y2-inventory/${id}`)).data.data;
+}
+
+export async function saveY2Inventory(input: Y2InventoryRecordInput): Promise<Y2InventoryRecord> {
+  return (await http.put<ApiResponse<Y2InventoryRecord>>("/y2-inventory", input)).data.data;
+}
+
+export async function deleteY2Inventory(id: number): Promise<void> {
+  await http.delete(`/y2-inventory/${id}`);
+}
+
+export async function getY2InventoryBindingOptions(input: {
+  spu?: string;
+  productCode?: string;
+  inventoryProductId?: number;
+}): Promise<Y2InventoryBindingOptions> {
+  return (
+    await http.get<ApiResponse<Y2InventoryBindingOptions>>("/y2-inventory/binding-options", {
+      params: input,
+    })
+  ).data.data;
+}
+
 export interface ProductManagementSearchParams {
   spu?: string;
   skc?: string;
@@ -201,6 +258,18 @@ export async function updateProductManagementRecord(
     await http.put<ApiResponse<ProductManagementRecord>>(
       `/product-management/${id}`,
       input,
+    )
+  ).data.data;
+}
+
+export async function updateProductManagementPurchaseLinks(
+  id: number,
+  purchaseLinks: string[],
+): Promise<string[]> {
+  return (
+    await http.put<ApiResponse<string[]>>(
+      `/product-management/${id}/purchase-links`,
+      { purchaseLinks },
     )
   ).data.data;
 }
@@ -661,6 +730,7 @@ export async function syncZhihouPendingOrders(): Promise<ZhihouOrderSyncBatch> {
 export async function getZhihouOrderSummary(params: {
   search?: string;
   matchStatus?: ZhihouSkuMatchStatus;
+  storeName?: string;
 } = {}): Promise<ZhihouOrderSummaryResponse> {
   return (
     await http.get<ApiResponse<ZhihouOrderSummaryResponse>>(
@@ -672,10 +742,71 @@ export async function getZhihouOrderSummary(params: {
 
 export async function getZhihouOrderReferences(
   key: string,
+  storeName?: string,
 ): Promise<ZhihouOrderReferencesResponse> {
   return (
     await http.get<ApiResponse<ZhihouOrderReferencesResponse>>(
       `/zhihou-orders/summary/${encodeURIComponent(key)}/orders`,
+      { params: storeName ? { storeName } : undefined },
+    )
+  ).data.data;
+}
+
+export async function getZhihouStockPicks(): Promise<ZhihouStockPickDashboard> {
+  return (
+    await http.get<ApiResponse<ZhihouStockPickDashboard>>("/zhihou-orders/stock-picks")
+  ).data.data;
+}
+
+export async function createZhihouStockPick(
+  input: ZhihouStockPickInput,
+): Promise<ZhihouStockPickDashboard> {
+  return (
+    await http.post<ApiResponse<ZhihouStockPickDashboard>>(
+      "/zhihou-orders/stock-picks",
+      input,
+    )
+  ).data.data;
+}
+
+export async function previewZhihouBatchStockPick(
+  input: ZhihouBatchStockPickInput,
+): Promise<ZhihouBatchStockPickPreview> {
+  return (
+    await http.post<ApiResponse<ZhihouBatchStockPickPreview>>(
+      "/zhihou-orders/stock-picks/batch-preview",
+      input,
+    )
+  ).data.data;
+}
+
+export async function createZhihouBatchStockPick(
+  input: ZhihouBatchStockPickInput,
+): Promise<ZhihouBatchStockPickResult> {
+  return (
+    await http.post<ApiResponse<ZhihouBatchStockPickResult>>(
+      "/zhihou-orders/stock-picks/batch",
+      input,
+    )
+  ).data.data;
+}
+
+export async function deleteZhihouStockPick(id: number): Promise<void> {
+  await http.delete(`/zhihou-orders/stock-picks/${id}`);
+}
+
+export async function matchZhihouStockPicks(): Promise<ZhihouStockMatchResult> {
+  return (
+    await http.post<ApiResponse<ZhihouStockMatchResult>>(
+      "/zhihou-orders/stock-picks/match",
+    )
+  ).data.data;
+}
+
+export async function adjustZhihouStockInventory(): Promise<ZhihouInventoryAdjustmentResult> {
+  return (
+    await http.post<ApiResponse<ZhihouInventoryAdjustmentResult>>(
+      "/zhihou-orders/stock-picks/adjust-inventory",
     )
   ).data.data;
 }

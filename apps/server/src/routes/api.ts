@@ -43,6 +43,15 @@ import {
 import { config, paths } from "../config.js";
 import { database } from "../database/index.js";
 import { findAuthorizedImageAsset } from "../import/image-access-service.js";
+import { storeUploadedImage } from "../import/image-service.js";
+import {
+  deleteY2Inventory,
+  getY2Inventory,
+  getY2InventoryBindingOptions,
+  listY2Inventory,
+  listY2InventoryChangeLogs,
+  saveY2Inventory,
+} from "../inventory/y2-inventory-service.js";
 import { resetMissingImageAsset } from "../import/image-asset-health-service.js";
 import {
   getBatchImageProgress,
@@ -67,6 +76,7 @@ import {
   listProductManagementRecords,
   updateProductManagementColumnPreferences,
   updateProductManagementPageSize,
+  updateProductManagementPurchaseLinks,
   updateProductManagementRecord,
   updateProductManagementSettings,
 } from "../product-management/product-management-service.js";
@@ -94,6 +104,15 @@ const upload = multer({
     const extension = path.extname(file.originalname).toLowerCase();
     if (extension !== ".xlsx")
       return callback(new Error("仅支持 .xlsx 文件。"));
+    return callback(null, true);
+  },
+});
+
+const y2InventoryImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+  fileFilter: (_request, file, callback) => {
+    if (!file.mimetype.startsWith("image/")) return callback(new Error("仅支持图片文件。"));
     return callback(null, true);
   },
 });
@@ -217,6 +236,131 @@ apiRouter.get("/products", (request, response) => {
   response.json({ data: getProducts(activeShopId(request), options) });
 });
 
+const y2InventorySchema = z.object({
+  productCode: z.string().trim().max(200).nullable().default(null),
+  spu: z.string().trim().max(200).nullable().default(null),
+  productCodes: z.array(z.string().trim().min(1).max(200)).max(100).default([]),
+  spus: z.array(z.string().trim().min(1).max(200)).max(100).default([]),
+  imageAssetId: z.number().int().positive().nullable().default(null),
+  note: z.string().trim().max(5000).nullable().default(null),
+  sizes: z.array(z.string().trim().min(1).max(100)).min(1).max(50),
+  colors: z.array(z.object({
+    color: z.string().trim().max(100).optional(),
+    skcRowId: z.number().int().positive().nullable().optional(),
+    spuSpecs: z.array(z.object({
+      spu: z.string().trim().min(1).max(200),
+      skcRowId: z.number().int().positive().nullable(),
+      cells: z.array(z.object({
+        size: z.string().trim().min(1).max(100),
+        skuRowId: z.number().int().positive().nullable(),
+      })).max(50),
+    })).max(100).default([]),
+    cells: z.array(z.object({
+      size: z.string().trim().min(1).max(100),
+      quantity: z.number().int().nonnegative(),
+      skuRowId: z.number().int().positive().nullable().optional(),
+    })).min(1).max(50),
+  }).superRefine((value, context) => {
+    if (!value.color && !value.skcRowId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["color"],
+        message: "颜色和SKC绑定至少填写一项。",
+      });
+    }
+  })).min(1).max(100),
+}).superRefine((value, context) => {
+  const codes = [value.productCode ?? "", ...value.productCodes].map((item) => item.trim()).filter(Boolean);
+  const spus = [value.spu ?? "", ...value.spus].map((item) => item.trim()).filter(Boolean);
+  if (!codes.length && !spus.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["productCode"], message: "货号和SPU至少填写一个。" });
+  }
+});
+
+apiRouter.get("/y2-inventory", (request, response, next) => {
+  try {
+    const search = z.string().trim().max(500).optional().parse(request.query.search);
+    response.json({ data: listY2Inventory(search) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/y2-inventory/logs", (request, response) => {
+  response.json({ data: listY2InventoryChangeLogs() });
+});
+
+apiRouter.post(
+  "/y2-inventory/image",
+  y2InventoryImageUpload.single("file"),
+  async (request, response, next) => {
+    try {
+      if (!request.file) throw new Error("请选择库存图片。");
+      const stored = await storeUploadedImage(request.file.buffer, request.file.originalname);
+      response.status(201).json({
+        data: {
+          assetId: stored.assetId,
+          imageUrl: `/api/images/${stored.publicUrl.split("/").at(-1)}`,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+apiRouter.get("/y2-inventory/binding-options", (request, response, next) => {
+  try {
+    const query = z.object({
+      spu: z.string().trim().max(200).optional(),
+      productCode: z.string().trim().max(200).optional(),
+      inventoryProductId: z.coerce.number().int().positive().optional(),
+    }).refine((value) => Boolean(value.spu || value.productCode || value.inventoryProductId), {
+      message: "请填写SPU、货号或库存池。",
+    }).parse(request.query);
+    response.json({ data: getY2InventoryBindingOptions(query.spu, query.productCode, query.inventoryProductId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/y2-inventory/:id", (request, response, next) => {
+  try {
+    response.json({
+      data: getY2Inventory(
+        z.coerce.number().int().positive().parse(request.params.id),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.put("/y2-inventory", (request, response, next) => {
+  try {
+    response.json({
+      data: saveY2Inventory(
+        authenticatedUser(request),
+        y2InventorySchema.parse(request.body),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.delete("/y2-inventory/:id", (request, response, next) => {
+  try {
+    deleteY2Inventory(
+      authenticatedUser(request),
+      z.coerce.number().int().positive().parse(request.params.id),
+    );
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 const nullableText = z.string().trim().max(500).nullable().default(null);
 const nullableNumber = z
   .number()
@@ -283,6 +427,7 @@ apiRouter.get("/product-management", (request, response, next) => {
     if (query.sku) search.sku = query.sku;
     if (query.productCode) search.productCode = query.productCode;
     const user = authenticatedUser(request);
+    const scope = user.role === "admin" ? query.scope : "shop";
     const pageSize = (query.pageSize ?? getProductManagementPageSize(user.id)) as
       | 20
       | 50
@@ -291,7 +436,7 @@ apiRouter.get("/product-management", (request, response, next) => {
     const result = listProductManagementRecords(
       activeShopId(request),
       user,
-      query.scope,
+      scope,
       search,
       { page: query.page, pageSize },
     );
@@ -384,6 +529,23 @@ apiRouter.put("/product-management/:id", (request, response, next) => {
         activeShopId(request),
         authenticatedUser(request),
         productManagementRecordSchema.parse(request.body),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.put("/product-management/:id/purchase-links", (request, response, next) => {
+  try {
+    const input = z.object({
+      purchaseLinks: z.array(z.string().url().max(2000)).max(30).default([]),
+    }).parse(request.body);
+    response.json({
+      data: updateProductManagementPurchaseLinks(
+        z.coerce.number().int().positive().parse(request.params.id),
+        authenticatedUser(request),
+        input.purchaseLinks,
       ),
     });
   } catch (error) {
@@ -689,8 +851,11 @@ apiRouter.get("/images/:fileName", (request, response, next) => {
     const fileName = path.basename(
       z.string().min(1).parse(request.params.fileName),
     );
-    const shopId = activeShopId(request);
-    const allowed = findAuthorizedImageAsset(shopId, fileName);
+    const authenticated = request as unknown as AuthenticatedRequest;
+    const allowed = findAuthorizedImageAsset(
+      authenticated.auth.availableShops.map((shop) => shop.id),
+      fileName,
+    );
     if (!allowed)
       return response
         .status(404)

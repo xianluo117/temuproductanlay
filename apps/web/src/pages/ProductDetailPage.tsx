@@ -33,6 +33,7 @@ import {
   getProductOperations,
   updateProductOperation,
 } from '../api/client';
+import { localDateTime } from '../utils/date-time';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -48,10 +49,6 @@ interface OperationFormValue {
   note?: string;
 }
 
-function localDateTime(value: string): string {
-  const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`;
-  return dayjs(normalized).format('YYYY-MM-DD HH:mm:ss');
-}
 
 export function ProductDetailPage() {
   const { spu = '' } = useParams();

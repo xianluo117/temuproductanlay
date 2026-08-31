@@ -44,6 +44,7 @@ import {
   updateTemuShopProfile,
 } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { localDateTime } from "../utils/date-time";
 
 const { Title, Text } = Typography;
 const statusColors: Record<TemuBrowserRuntimeStatus, string> = {
@@ -380,8 +381,7 @@ export function TemuShopsPage() {
             title: "最近检查",
             dataIndex: "lastCheckedAt",
             width: 180,
-            render: (value: string | null) =>
-              value ? new Date(value).toLocaleString() : "-",
+            render: (value: string | null) => localDateTime(value),
           },
           {
             title: "最近错误",
@@ -411,7 +411,7 @@ export function TemuShopsPage() {
                     {sync.requestedByUsername}
                   </Text>
                   <Text type="secondary">
-                    {new Date(sync.startedAt).toLocaleString()}
+                    {localDateTime(sync.startedAt)}
                   </Text>
                   {sync.errorMessage && (
                     <Text
@@ -443,7 +443,7 @@ export function TemuShopsPage() {
                     </Text>
                   </Space>
                   <Text type="secondary">
-                    操作人 {sync.requestedByUsername} · {new Date(sync.startedAt).toLocaleString()}
+                    操作人 {sync.requestedByUsername} · {localDateTime(sync.startedAt)}
                   </Text>
                   {sync.errorMessage && (
                     <Text type="danger" ellipsis={{ tooltip: sync.errorMessage }} style={{ maxWidth: 310 }}>
@@ -623,7 +623,7 @@ export function TemuShopsPage() {
               title: "时间",
               dataIndex: "createdAt",
               width: 180,
-              render: (value: string) => new Date(value).toLocaleString(),
+              render: (value: string) => localDateTime(value),
             },
             { title: "事件", dataIndex: "eventType", width: 190 },
             {

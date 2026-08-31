@@ -8,6 +8,7 @@ import {
   migrateTemuLifecycle,
   migrateTemuShopProfiles,
   migrateToMultiUser,
+  migrateY2Inventory,
   migrateZhihouErp,
 } from "./migrations.js";
 import {
@@ -196,8 +197,11 @@ export function runDatabaseMigrations(): void {
   ensureShopBusinessSchema(database);
   migrateProductManagement(database);
   migrateZhihouErp(database);
+  migrateY2Inventory(database);
   migrateProductImages(database);
 }
+
+runDatabaseMigrations();
 
 export function closeDatabase(): void {
   database.close();

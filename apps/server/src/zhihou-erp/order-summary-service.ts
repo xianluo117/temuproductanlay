@@ -1,4 +1,5 @@
 import type {
+  ZhihouInventoryPickOption,
   ZhihouNewOrderItem,
   ZhihouOrderMatrix,
   ZhihouOrderMatrixCell,
@@ -10,7 +11,26 @@ import type {
 } from "@temu-analytics/shared";
 import { createHash } from "node:crypto";
 import { database } from "../database/index.js";
+import {
+  y2InventoryBySku,
+  zhihouInventoryPickOptions,
+} from "../inventory/y2-inventory-service.js";
 import { latestCompletedZhihouOrderSync } from "./order-sync-service.js";
+
+const preferredSizeOrder = ["S", "M", "L", "XL", "XXL"];
+
+function sizeSort(left: string, right: string): number {
+  const normalizedLeft = left.trim().toUpperCase();
+  const normalizedRight = right.trim().toUpperCase();
+  const leftIndex = preferredSizeOrder.indexOf(normalizedLeft);
+  const rightIndex = preferredSizeOrder.indexOf(normalizedRight);
+  if (leftIndex !== -1 || rightIndex !== -1) {
+    if (leftIndex === -1) return 1;
+    if (rightIndex === -1) return -1;
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+  }
+  return left.localeCompare(right, "zh-CN", { numeric: true });
+}
 
 interface ItemRow {
   id: number;
@@ -41,6 +61,7 @@ interface BindingRow {
 interface LifecycleRow {
   shop_profile_id: number;
   spu: string;
+  skc_row_id: number;
   skc_id: string | null;
   skc_code: string | null;
   attribute_json: string | null;
@@ -54,6 +75,7 @@ interface LifecycleRow {
 
 interface BatchMatch {
   status: ZhihouSkuMatchStatus;
+  productManagementRecordId: number | null;
   matchType: ZhihouSkuMatchType;
   parentSpu: string | null;
   productCode: string | null;
@@ -66,12 +88,19 @@ interface MutableSummary {
   row: ZhihouOrderMatrixCell;
   orders: Map<string, ZhihouOrderReference>;
   skuSet: Set<string>;
+  productCodeSet: Set<string>;
   purchaseLinkSet: Set<string>;
   messageSet: Set<string>;
 }
 
 const unknownColor = "未知颜色";
 const unknownSize = "未知尺码";
+
+function hasTable(table: string): boolean {
+  return Boolean(
+    database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table),
+  );
+}
 
 function hasColumn(table: string, columnName: string): boolean {
   return (database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some(
@@ -202,7 +231,7 @@ function batchLifecycle(rows: BindingRow[]): LifecycleRow[] {
   return database
     .prepare(
       `SELECT spu_row.shop_profile_id, spu_row.spu,
-              skc.skc_id, skc.skc_code, skc.attribute_json, skc.image_url,
+              skc.id AS skc_row_id, skc.skc_id, skc.skc_code, skc.attribute_json, skc.image_url,
               ${imageAssetColumn} AS image_asset_id,
               sku.sku_id, sku.sku_code, sku.size_name, sku.specification_json
        FROM temu_lifecycle_spu_current spu_row
@@ -266,6 +295,7 @@ function buildMatchMap(items: ItemRow[]): Map<string, BatchMatch> {
     if (!uniqueRecords.size) {
       result.set(sku, {
         status: "unmatched",
+        productManagementRecordId: null,
         matchType: "none",
         parentSpu: null,
         productCode: null,
@@ -278,6 +308,7 @@ function buildMatchMap(items: ItemRow[]): Map<string, BatchMatch> {
     if (uniqueRecords.size > 1) {
       result.set(sku, {
         status: "conflict",
+        productManagementRecordId: null,
         matchType,
         parentSpu: null,
         productCode: null,
@@ -303,6 +334,7 @@ function buildMatchMap(items: ItemRow[]): Map<string, BatchMatch> {
     if (lifecycleIdentities.size > 1) {
       result.set(sku, {
         status: "conflict",
+        productManagementRecordId: binding.record_id,
         matchType,
         parentSpu: binding.parent_spu,
         productCode: binding.product_code,
@@ -314,6 +346,7 @@ function buildMatchMap(items: ItemRow[]): Map<string, BatchMatch> {
     }
     result.set(sku, {
       status: "matched",
+      productManagementRecordId: binding.record_id,
       matchType,
       parentSpu: binding.parent_spu,
       productCode: binding.product_code,
@@ -351,21 +384,48 @@ function summaryKey(identity: string): string {
   return createHash("sha256").update(identity).digest("base64url").slice(0, 24);
 }
 
-function preferredImage(
+function preferredImages(
   lifecycle: LifecycleRow | null,
   item: ZhihouNewOrderItem,
   itemAssetId: number | null,
   imageUrls: Map<number, string>,
-): string | null {
-  return imageUrls.get(lifecycle?.image_asset_id ?? 0)
-    ?? lifecycle?.image_url
-    ?? imageUrls.get(itemAssetId ?? 0)
-    ?? item.specificationImageUrl
-    ?? item.mainImageUrl;
+): string[] {
+  return [...new Set([
+    imageUrls.get(lifecycle?.image_asset_id ?? 0),
+    lifecycle?.image_url,
+    imageUrls.get(itemAssetId ?? 0),
+    item.specificationImageUrl,
+    item.mainImageUrl,
+  ].map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
-function buildLeafSummaries(syncBatchId: number): Map<string, MutableSummary> {
-  const rawItems = itemRows(syncBatchId);
+function matchLifecycleSkuId(
+  zhihouSkus: string[],
+  matches: Map<string, BatchMatch>,
+): string | null {
+  return zhihouSkus
+    .map((sku) => matches.get(normalized(sku))?.lifecycle?.sku_id ?? null)
+    .find((value): value is string => Boolean(value)) ?? null;
+}
+
+function matchLifecycleSkuCode(
+  zhihouSkus: string[],
+  matches: Map<string, BatchMatch>,
+): string | null {
+  return zhihouSkus
+    .map((sku) => matches.get(normalized(sku))?.lifecycle?.sku_code ?? null)
+    .find((value): value is string => Boolean(value)) ?? null;
+}
+
+function buildLeafSummaries(
+  syncBatchId: number,
+  storeName?: string,
+): Map<string, MutableSummary> {
+  const allItems = itemRows(syncBatchId);
+  const selectedStoreName = storeName?.trim() ?? "";
+  const rawItems = selectedStoreName
+    ? allItems.filter((item) => (item.store_name?.trim() ?? "") === selectedStoreName)
+    : allItems;
   const matches = buildMatchMap(rawItems);
   const imageUrls = batchImageUrls([
     ...rawItems.map((item) => item.image_asset_id),
@@ -393,16 +453,29 @@ function buildLeafSummaries(syncBatchId: number): Map<string, MutableSummary> {
     });
     const key = summaryKey(identity);
     let summary = summaries.get(key);
+    const itemImageUrls = preferredImages(match.lifecycle, item, raw.image_asset_id, imageUrls);
     if (!summary) {
       summary = {
         row: {
           key,
+          productManagementRecordId: match.productManagementRecordId,
           parentSpu: match.parentSpu,
           zhihouSkus: [],
+          productCodes: [],
           color,
           size,
           requiredQuantity: 0,
-          imageUrl: preferredImage(match.lifecycle, item, raw.image_asset_id, imageUrls),
+          y2InventoryQuantity: null,
+          inventoryPickableQuantity: 0,
+          pickedQuantity: 0,
+          remainingPurchaseQuantity: 0,
+          inventoryDifference: null,
+          suggestedPurchaseQuantity: null,
+          inventoryPickOptions: [],
+          inventoryMatchStatus: null,
+          inventoryMatchMessage: null,
+          imageUrl: itemImageUrls[0] ?? null,
+          imageUrls: itemImageUrls,
           purchaseLinks: [],
           matchStatus: match.status,
           matchMessage: match.message,
@@ -411,20 +484,24 @@ function buildLeafSummaries(syncBatchId: number): Map<string, MutableSummary> {
         },
         orders: new Map(),
         skuSet: new Set(),
+        productCodeSet: new Set(),
         purchaseLinkSet: new Set(),
         messageSet: new Set(match.message ? [match.message] : []),
       };
       summaries.set(key, summary);
     }
-    summary.row.requiredQuantity += item.quantity;
-    summary.row.imageUrl ??= preferredImage(match.lifecycle, item, raw.image_asset_id, imageUrls);
-    summary.skuSet.add(item.zhihouSku);
-    match.purchaseLinks.forEach((link) => summary.purchaseLinkSet.add(link));
-    if (match.message) summary.messageSet.add(match.message);
-    const order = summary.orders.get(item.orderNo);
+    const currentSummary = summary;
+    currentSummary.row.requiredQuantity += item.quantity;
+    currentSummary.row.imageUrls = [...new Set([...currentSummary.row.imageUrls, ...itemImageUrls])];
+    currentSummary.row.imageUrl = currentSummary.row.imageUrls[0] ?? null;
+    currentSummary.skuSet.add(item.zhihouSku);
+    if (match.productCode) currentSummary.productCodeSet.add(match.productCode);
+    match.purchaseLinks.forEach((link) => currentSummary.purchaseLinkSet.add(link));
+    if (match.message) currentSummary.messageSet.add(match.message);
+    const order = currentSummary.orders.get(item.orderNo);
     if (order) order.quantity += item.quantity;
     else {
-      summary.orders.set(item.orderNo, {
+      currentSummary.orders.set(item.orderNo, {
         orderNo: item.orderNo,
         quantity: item.quantity,
         storeName: item.storeName,
@@ -435,10 +512,69 @@ function buildLeafSummaries(syncBatchId: number): Map<string, MutableSummary> {
   }
   for (const summary of summaries.values()) {
     summary.row.zhihouSkus = [...summary.skuSet].sort();
+    summary.row.productCodes = [...summary.productCodeSet].sort();
     summary.row.purchaseLinks = [...summary.purchaseLinkSet];
     summary.row.matchMessage = [...summary.messageSet].join("；") || null;
     summary.row.orderNos = [...summary.orders.keys()].sort();
     summary.row.orderCount = summary.orders.size;
+    const inventory = y2InventoryBySku(
+      matchLifecycleSkuId(summary.row.zhihouSkus, matches),
+      matchLifecycleSkuCode(summary.row.zhihouSkus, matches),
+    );
+    const targetLifecycle = summary.row.zhihouSkus
+      .map((sku) => matches.get(normalized(sku))?.lifecycle ?? null)
+      .find((value): value is LifecycleRow => Boolean(value)) ?? null;
+    const pickOptions = zhihouInventoryPickOptions({
+      productManagementRecordId: summary.row.productManagementRecordId,
+      productCodes: summary.row.productCodes,
+      targetSkcRowId: targetLifecycle?.skc_row_id ?? null,
+      targetColor: summary.row.color,
+      targetSize: summary.row.size,
+      targetKey: summary.row.key,
+    });
+    const exactOptions = pickOptions.filter((option) => option.isExact);
+    const exactQuantity = exactOptions.reduce((total, option) => total + option.quantity, 0);
+    const picked = hasTable("zhihou_stock_pick_items")
+      ? (() => {
+          const activeOrderCondition = hasColumn("zhihou_stock_order_snapshots", "is_active")
+            ? " AND order_row.is_active = 1"
+            : "";
+          return database.prepare(
+            `SELECT
+               COALESCE((
+                 SELECT SUM(pick.picked_quantity - pick.matched_quantity)
+                 FROM zhihou_stock_pick_items pick
+                 WHERE pick.target_key = ?
+               ), 0)
+               + COALESCE((
+                 SELECT SUM(allocation.quantity)
+                 FROM zhihou_stock_pick_allocations allocation
+                 JOIN zhihou_stock_order_item_snapshots item
+                   ON item.id = allocation.order_item_snapshot_id
+                 JOIN zhihou_stock_order_snapshots order_row
+                   ON order_row.id = item.order_snapshot_id
+                 WHERE item.target_key = ?${activeOrderCondition}
+               ), 0) AS quantity`,
+          ).get(summary.row.key, summary.row.key) as { quantity: number };
+        })()
+      : { quantity: 0 };
+    summary.row.inventoryPickOptions = pickOptions;
+    summary.row.inventoryPickableQuantity = Math.min(
+      Math.max(summary.row.requiredQuantity - picked.quantity, 0),
+      exactQuantity,
+    );
+    summary.row.pickedQuantity = picked.quantity;
+    summary.row.remainingPurchaseQuantity = Math.max(
+      summary.row.requiredQuantity - picked.quantity,
+      0,
+    );
+    summary.row.y2InventoryQuantity = inventory?.quantity ?? (exactOptions.length ? exactQuantity : null);
+    summary.row.inventoryDifference = summary.row.y2InventoryQuantity === null
+      ? null
+      : summary.row.y2InventoryQuantity - summary.row.requiredQuantity;
+    summary.row.suggestedPurchaseQuantity = null;
+    summary.row.inventoryMatchStatus = inventory?.status ?? (exactOptions.length ? "matched" : null);
+    summary.row.inventoryMatchMessage = inventory?.message ?? (pickOptions.length ? null : "没有可用的Y2库存规格。");
   }
   return summaries;
 }
@@ -461,9 +597,7 @@ function buildMatrices(cells: ZhihouOrderMatrixCell[]): ZhihouOrderMatrix[] {
   }
   return [...spuGroups.entries()]
     .map(([identity, spuCells]) => {
-      const sizes = [...new Set(spuCells.map((cell) => cell.size))].sort((left, right) =>
-        left.localeCompare(right, "zh-CN", { numeric: true }),
-      );
+      const sizes = [...new Set(spuCells.map((cell) => cell.size))].sort(sizeSort);
       const colorGroups = new Map<string, ZhihouOrderMatrixCell[]>();
       for (const cell of spuCells) {
         const values = colorGroups.get(normalized(cell.color)) ?? [];
@@ -471,35 +605,61 @@ function buildMatrices(cells: ZhihouOrderMatrixCell[]): ZhihouOrderMatrix[] {
         colorGroups.set(normalized(cell.color), values);
       }
       const colorRows = [...colorGroups.values()]
-        .map((colorCells) => ({
+        .map((colorCells) => {
+          const imageUrls = [...new Set(colorCells.flatMap((cell) => cell.imageUrls))];
+          return {
           key: `color-${summaryKey(`${identity}|${normalized(colorCells[0]?.color)}`)}`,
           color: colorCells[0]?.color ?? unknownColor,
-          imageUrl: colorCells.find((cell) => cell.imageUrl)?.imageUrl ?? null,
+          imageUrl: imageUrls[0] ?? null,
+          imageUrls,
           requiredQuantity: colorCells.reduce((total, cell) => total + cell.requiredQuantity, 0),
+          y2InventoryQuantity: colorCells.reduce((total, cell) => total + (cell.y2InventoryQuantity ?? 0), 0),
+          suggestedPurchaseQuantity: colorCells.reduce((total, cell) => total + cell.remainingPurchaseQuantity, 0),
           cells: Object.fromEntries(colorCells.map((cell) => [cell.size, cell])),
-        }))
+          };
+        })
         .sort((left, right) => left.color.localeCompare(right.color, "zh-CN"));
       return {
         key: `matrix-${summaryKey(identity)}`,
+        productManagementRecordId: spuCells[0]?.productManagementRecordId ?? null,
         parentSpu: spuCells[0]?.parentSpu ?? null,
         fallbackSku: spuCells[0]?.parentSpu ? null : spuCells[0]?.zhihouSkus[0] ?? null,
+        productCodes: [...new Set(spuCells.flatMap((cell) => cell.productCodes))].sort(),
+        purchaseLinks: [...new Set(spuCells.flatMap((cell) => cell.purchaseLinks))],
         sizes,
         colorRows,
         requiredQuantity: spuCells.reduce((total, cell) => total + cell.requiredQuantity, 0),
+        y2InventoryQuantity: spuCells.reduce((total, cell) => total + (cell.y2InventoryQuantity ?? 0), 0),
+        inventoryPickableQuantity: spuCells.reduce((total, cell) => total + cell.inventoryPickableQuantity, 0),
+        pickedQuantity: spuCells.reduce((total, cell) => total + cell.pickedQuantity, 0),
+        remainingPurchaseQuantity: spuCells.reduce((total, cell) => total + cell.remainingPurchaseQuantity, 0),
+        suggestedPurchaseQuantity: spuCells.reduce((total, cell) => total + cell.remainingPurchaseQuantity, 0),
         matchStatus: aggregateStatus(spuCells),
       } satisfies ZhihouOrderMatrix;
     })
-    .sort((left, right) =>
-      (left.parentSpu ?? left.fallbackSku ?? "").localeCompare(
+    .sort((left, right) => {
+      const leftProductCode = left.productCodes[0];
+      const rightProductCode = right.productCodes[0];
+      if (leftProductCode && !rightProductCode) return -1;
+      if (!leftProductCode && rightProductCode) return 1;
+      const productCodeComparison = (leftProductCode ?? "").localeCompare(
+        rightProductCode ?? "",
+        "zh-CN",
+        { numeric: true },
+      );
+      if (productCodeComparison !== 0) return productCodeComparison;
+      return (left.parentSpu ?? left.fallbackSku ?? "").localeCompare(
         right.parentSpu ?? right.fallbackSku ?? "",
         "zh-CN",
-      ),
-    );
+        { numeric: true },
+      );
+    });
 }
 
 function matchesSearch(row: ZhihouOrderMatrixCell, keyword: string): boolean {
   return [
     row.parentSpu ?? "",
+    ...row.productCodes,
     row.color ?? "",
     row.size ?? "",
     ...row.zhihouSkus,
@@ -510,27 +670,38 @@ function matchesSearch(row: ZhihouOrderMatrixCell, keyword: string): boolean {
 export function getZhihouOrderSummary(options: {
   search?: string;
   matchStatus?: ZhihouSkuMatchStatus;
+  storeName?: string;
 } = {}): ZhihouOrderSummaryResponse {
   const latestSync = latestCompletedZhihouOrderSync();
   if (!latestSync) {
     return {
       latestSync: null,
+      storeNames: [],
       matrices: [],
       totalRequiredQuantity: 0,
+      totalY2InventoryQuantity: 0,
+      totalSuggestedPurchaseQuantity: 0,
       matchedRowCount: 0,
       unmatchedRowCount: 0,
       conflictRowCount: 0,
     };
   }
-  const summaries = buildLeafSummaries(latestSync.id);
+  const storeNames = [...new Set(itemRows(latestSync.id)
+    .map((item) => item.store_name?.trim() ?? "")
+    .filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "zh-CN", { numeric: true }));
+  const summaries = buildLeafSummaries(latestSync.id, options.storeName);
   let leaves = [...summaries.values()].map((item) => item.row);
   if (options.matchStatus) leaves = leaves.filter((row) => row.matchStatus === options.matchStatus);
   const keyword = normalized(options.search);
   if (keyword) leaves = leaves.filter((row) => matchesSearch(row, keyword));
   return {
     latestSync,
+    storeNames,
     matrices: buildMatrices(leaves),
     totalRequiredQuantity: leaves.reduce((total, row) => total + row.requiredQuantity, 0),
+    totalY2InventoryQuantity: leaves.reduce((total, row) => total + row.inventoryPickableQuantity, 0),
+    totalSuggestedPurchaseQuantity: 0,
     matchedRowCount: leaves.filter((row) => row.matchStatus === "matched").length,
     unmatchedRowCount: leaves.filter((row) => row.matchStatus === "unmatched").length,
     conflictRowCount: leaves.filter((row) => row.matchStatus === "conflict").length,
@@ -539,10 +710,11 @@ export function getZhihouOrderSummary(options: {
 
 export function getZhihouOrderReferences(
   key: string,
+  storeName?: string,
 ): ZhihouOrderReferencesResponse {
   const latestSync = latestCompletedZhihouOrderSync();
   if (!latestSync) throw new Error("尚无成功的智猴新订单同步数据。");
-  const summary = buildLeafSummaries(latestSync.id).get(key);
+  const summary = buildLeafSummaries(latestSync.id, storeName).get(key);
   if (!summary) throw new Error("订单汇总项不存在或已被新同步替换。");
   return {
     summaryKey: key,

@@ -20,7 +20,7 @@ function mimeFromExtension(extension: string): string {
   return 'image/png';
 }
 
-async function storeBuffer(
+export async function storeBuffer(
   buffer: Buffer,
   extension: string,
   source: 'embedded' | 'remote',
@@ -85,6 +85,14 @@ async function storeBuffer(
 
 export async function storeEmbeddedImage(image: ParsedImage): Promise<StoredImage> {
   return storeBuffer(image.buffer, image.extension, 'embedded', null);
+}
+
+export async function storeUploadedImage(
+  buffer: Buffer,
+  originalName: string,
+): Promise<StoredImage> {
+  const extension = path.extname(originalName).slice(1) || 'jpg';
+  return storeBuffer(buffer, extension, 'embedded', null);
 }
 
 function extensionFromContentType(contentType: string): string {

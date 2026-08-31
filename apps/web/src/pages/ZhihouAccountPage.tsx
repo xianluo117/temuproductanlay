@@ -25,6 +25,7 @@ import {
   testZhihouAccount,
 } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { localDateTime } from "../utils/date-time";
 
 const { Title, Text } = Typography;
 
@@ -35,7 +36,7 @@ interface AccountForm {
 }
 
 function dateTime(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : "-";
+  return localDateTime(value);
 }
 
 export function ZhihouAccountPage() {

@@ -490,6 +490,144 @@ export interface ProductLifecycleMatch {
   details: ProductLifecycleSpuDetail[];
 }
 
+export type Y2InventoryMatchStatus = "matched" | "unmatched" | "conflict";
+
+export interface Y2InventorySummary {
+  inventoryId: number;
+  totalQuantity: number;
+  matchedColorCount: number;
+  unmatchedColorCount: number;
+  conflictColorCount: number;
+}
+
+export interface Y2InventoryCell {
+  id: number;
+  size: string;
+  quantity: number;
+  skuRowId: number | null;
+  skuId: string | null;
+  skuCode: string | null;
+  matchStatus: Y2InventoryMatchStatus;
+  matchMessage: string | null;
+}
+
+export interface Y2InventorySpuSpec {
+  spu: string;
+  colorRowId: number;
+  cellId: number;
+  skcRowId: number | null;
+  skuRowId: number | null;
+}
+
+export interface Y2InventoryColorRow {
+  id: number;
+  color: string;
+  skcRowId: number | null;
+  skcId: string | null;
+  skcCode: string | null;
+  imageUrl: string | null;
+  matchStatus: Y2InventoryMatchStatus;
+  matchMessage: string | null;
+  totalQuantity: number;
+  cells: Y2InventoryCell[];
+}
+
+export interface Y2InventoryRecord {
+  id: number;
+  productManagementRecordId: number | null;
+  productCode: string | null;
+  spu: string | null;
+  productCodes: string[];
+  spus: string[];
+  imageAssetId: number | null;
+  imageUrl: string | null;
+  note: string | null;
+  sizes: string[];
+  totalQuantity: number;
+  matchedColorCount: number;
+  unmatchedColorCount: number;
+  conflictColorCount: number;
+  colors: Y2InventoryColorRow[];
+  spuSpecs: Y2InventorySpuSpec[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Y2InventoryListItem extends Y2InventoryRecord {}
+
+export interface Y2InventoryListResponse {
+  items: Y2InventoryListItem[];
+  totalQuantity: number;
+  matchedCount: number;
+  issueCount: number;
+}
+
+export interface Y2InventoryCellInput {
+  size: string;
+  quantity: number;
+  skuRowId?: number | null | undefined;
+}
+
+export interface Y2InventorySpuSpecInput {
+  spu: string;
+  skcRowId: number | null;
+  cells: Array<{
+    size: string;
+    skuRowId: number | null;
+  }>;
+}
+
+export interface Y2InventoryColorInput {
+  color?: string | undefined;
+  skcRowId?: number | null | undefined;
+  cells: Y2InventoryCellInput[];
+  spuSpecs?: Y2InventorySpuSpecInput[];
+}
+
+export interface Y2InventoryRecordInput {
+  productCode: string | null;
+  spu: string | null;
+  productCodes?: string[];
+  spus?: string[];
+  imageAssetId: number | null;
+  note: string | null;
+  sizes: string[];
+  colors: Y2InventoryColorInput[];
+}
+
+export interface Y2InventoryImageUploadResult {
+  assetId: number;
+  imageUrl: string;
+}
+
+export interface Y2InventoryChangeLog {
+  id: number;
+  inventoryProductId: number | null;
+  productCode: string;
+  action: "create" | "update" | "delete";
+  changedByUsername: string;
+  beforeTotalQuantity: number | null;
+  afterTotalQuantity: number | null;
+  changedAt: string;
+}
+
+export interface Y2InventoryBindingCandidate {
+  rowId: number;
+  id: string | null;
+  code: string | null;
+  label: string;
+  imageUrl: string | null;
+}
+
+export interface Y2InventoryBindingOptions {
+  spu: string;
+  resolvedFromProductCode: boolean;
+  availableSpus?: string[];
+  skcs: Array<Y2InventoryBindingCandidate & {
+    skus: Y2InventoryBindingCandidate[];
+  }>;
+}
+
 export interface ProductManagementBinding {
   id: number;
   skcId: string | null;
@@ -575,6 +713,7 @@ export interface ProductManagementRecord {
   purchaseLinks: string[];
   spuLinks: ProductManagementSpuLink[];
   lifecycleMatch: ProductLifecycleMatch;
+  y2Inventory: Y2InventorySummary | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -608,6 +747,7 @@ export interface ProductManagementRecordInput {
 export const PRODUCT_MANAGEMENT_COLUMN_KEYS = [
   "image",
   "productCode",
+  "y2Inventory",
   "serialNumber",
   "goodsValue",
   "totalCost",
@@ -741,14 +881,120 @@ export interface ZhihouOrderReference {
   submittedAt: string | null;
 }
 
+export interface ZhihouInventoryPickOption {
+  inventoryCellId: number;
+  productCode: string;
+  color: string;
+  size: string;
+  quantity: number;
+  isExact: boolean;
+  isSavedConversion: boolean;
+}
+
+export interface ZhihouStockPickInput {
+  targetKey: string;
+  inventoryCellId: number;
+  quantity: number;
+  saveConversion: boolean;
+}
+
+export interface ZhihouStockPickItem {
+  id: number;
+  imageUrl: string | null;
+  imageUrls: string[];
+  targetKey: string;
+  parentSpu: string | null;
+  targetZhihouSku: string;
+  targetColor: string;
+  targetSize: string;
+  inventoryCellId: number;
+  productCode: string;
+  sourceColor: string;
+  sourceSize: string;
+  pickedQuantity: number;
+  matchedQuantity: number;
+  unmatchedQuantity: number;
+  adjustedQuantity: number;
+  inventoryAdjusted: boolean;
+  createdAt: string;
+}
+
+export interface ZhihouAllocatedOrderItem {
+  pickItemId: number;
+  targetZhihouSku: string;
+  targetColor: string;
+  targetSize: string;
+  sourceColor: string;
+  sourceSize: string;
+  quantity: number;
+}
+
+export interface ZhihouAllocatedOrder {
+  orderNo: string;
+  submittedAt: string | null;
+  requiredQuantity: number;
+  allocatedQuantity: number;
+  complete: boolean;
+  items: ZhihouAllocatedOrderItem[];
+}
+
+export interface ZhihouStockPickDashboard {
+  picks: ZhihouStockPickItem[];
+  orders: ZhihouAllocatedOrder[];
+  totalPickedQuantity: number;
+  totalUnmatchedQuantity: number;
+  totalUnadjustedQuantity: number;
+  completedOrderCount: number;
+}
+
+export interface ZhihouStockMatchResult {
+  allocatedQuantity: number;
+  completedOrderCount: number;
+}
+
+export interface ZhihouBatchStockPickInput {
+  targetKeys: string[];
+}
+
+export interface ZhihouBatchStockPickPreview {
+  targetCount: number;
+  pickableTargetCount: number;
+  expectedQuantity: number;
+  insufficientTargetCount: number;
+  unavailableTargetCount: number;
+}
+
+export interface ZhihouBatchStockPickResult extends ZhihouBatchStockPickPreview {
+  pickedQuantity: number;
+  createdPickCount: number;
+}
+
+export interface ZhihouInventoryAdjustmentResult {
+  adjustedQuantity: number;
+  adjustedPickCount: number;
+  skippedPickCount: number;
+}
+
 export interface ZhihouOrderMatrixCell {
   key: string;
+  productManagementRecordId: number | null;
   parentSpu: string | null;
   zhihouSkus: string[];
+  productCodes: string[];
   color: string;
   size: string;
   requiredQuantity: number;
+  y2InventoryQuantity: number | null;
+  inventoryPickableQuantity: number;
+  pickedQuantity: number;
+  remainingPurchaseQuantity: number;
+  inventoryDifference: number | null;
+  suggestedPurchaseQuantity: number | null;
+  inventoryPickOptions: ZhihouInventoryPickOption[];
+  inventoryMatchStatus: Y2InventoryMatchStatus | null;
+  inventoryMatchMessage: string | null;
   imageUrl: string | null;
+  imageUrls: string[];
   purchaseLinks: string[];
   matchStatus: ZhihouSkuMatchStatus;
   matchMessage: string | null;
@@ -760,24 +1006,38 @@ export interface ZhihouOrderMatrixColorRow {
   key: string;
   color: string;
   imageUrl: string | null;
+  imageUrls: string[];
   requiredQuantity: number;
+  y2InventoryQuantity: number;
+  suggestedPurchaseQuantity: number;
   cells: Record<string, ZhihouOrderMatrixCell>;
 }
 
 export interface ZhihouOrderMatrix {
   key: string;
+  productManagementRecordId: number | null;
   parentSpu: string | null;
   fallbackSku: string | null;
+  productCodes: string[];
+  purchaseLinks: string[];
   sizes: string[];
   colorRows: ZhihouOrderMatrixColorRow[];
   requiredQuantity: number;
+  y2InventoryQuantity: number;
+  inventoryPickableQuantity: number;
+  pickedQuantity: number;
+  remainingPurchaseQuantity: number;
+  suggestedPurchaseQuantity: number;
   matchStatus: ZhihouSkuMatchStatus;
 }
 
 export interface ZhihouOrderSummaryResponse {
   latestSync: ZhihouOrderSyncBatch | null;
+  storeNames: string[];
   matrices: ZhihouOrderMatrix[];
   totalRequiredQuantity: number;
+  totalY2InventoryQuantity: number;
+  totalSuggestedPurchaseQuantity: number;
   matchedRowCount: number;
   unmatchedRowCount: number;
   conflictRowCount: number;

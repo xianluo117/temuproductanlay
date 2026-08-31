@@ -15,6 +15,7 @@ import {
 } from "@temu-analytics/shared";
 import { database } from "../database/index.js";
 import { lifecycleMatchesForProducts } from "../temu-shops/lifecycle-match-service.js";
+import { y2InventorySummariesForRecords } from "../inventory/y2-inventory-service.js";
 import {
   lifecycleCodeSqlExpression,
   lifecycleProductCodeKey,
@@ -437,6 +438,7 @@ function mapRecord(
   settings: ProductManagementSettings,
   batch: ProductManagementBatchData,
   lifecycleMatch: ProductManagementRecord["lifecycleMatch"],
+  y2Inventory: ProductManagementRecord["y2Inventory"],
 ): ProductManagementRecord {
   const pricing = calculatePricing({
     goodsValue: row.goods_value,
@@ -466,6 +468,7 @@ function mapRecord(
     purchaseLinks: batch.purchaseLinksByRecord.get(row.id) ?? [],
     spuLinks: spuLinksFor(row, settings, batch),
     lifecycleMatch,
+    y2Inventory,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -595,6 +598,9 @@ export function listProductManagementRecords(
     shopId,
     rows.map((row) => row.product_code),
   );
+  const y2Inventory = y2InventorySummariesForRecords(
+    rows.map((row) => ({ id: row.id, productCode: row.product_code })),
+  );
   return {
     scope,
     settings,
@@ -610,6 +616,7 @@ export function listProductManagementRecords(
         settings,
         batch,
         lifecycleMatches.get(row.product_code)!,
+        y2Inventory.get(row.id) ?? null,
       );
       return {
         ...record,
@@ -690,6 +697,32 @@ function replaceChildren(
       insertBinding.run(Number(result.lastInsertRowid), ...values);
     }
   }
+}
+
+export function updateProductManagementPurchaseLinks(
+  recordId: number,
+  user: UserAccount,
+  purchaseLinks: string[],
+): string[] {
+  const row = database.prepare(
+    "SELECT shop_profile_id FROM product_management_records WHERE id = ?",
+  ).get(recordId) as { shop_profile_id: number } | undefined;
+  if (!row) throw new Error("产品主档不存在。");
+  ensureEditable(recordId, row.shop_profile_id, user);
+  database.transaction(() => {
+    database.prepare(
+      "DELETE FROM product_management_purchase_links WHERE record_id = ?",
+    ).run(recordId);
+    const insert = database.prepare(
+      `INSERT INTO product_management_purchase_links (record_id, url, sort_order)
+       VALUES (?, ?, ?)`,
+    );
+    purchaseLinks.forEach((url, index) => insert.run(recordId, url.trim(), index));
+    database.prepare(
+      "UPDATE product_management_records SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).run(recordId);
+  })();
+  return purchaseLinks.map((url) => url.trim());
 }
 
 export function createProductManagementRecord(
@@ -775,7 +808,10 @@ export function getProductManagementRecord(
   const lifecycleMatch = lifecycleMatchesForProducts(shopId, [row.product_code]).get(
     row.product_code,
   )!;
-  return mapRecord(row, user, settings, batch, lifecycleMatch);
+  const y2Inventory = y2InventorySummariesForRecords([
+    { id: recordId, productCode: row.product_code },
+  ]).get(recordId) ?? null;
+  return mapRecord(row, user, settings, batch, lifecycleMatch, y2Inventory);
 }
 
 export function deleteProductManagementRecord(
