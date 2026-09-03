@@ -12,6 +12,7 @@ import type {
   Y2InventorySummary,
 } from "@temu-analytics/shared";
 import { database } from "../database/index.js";
+import { releaseInactiveZhihouStockPicks } from "../zhihou-erp/stock-pick-cleanup.js";
 
 interface ProductRow {
   id: number;
@@ -371,6 +372,47 @@ function insertUnreferencedColorRows(
   if (colors.length) insertColorRows(productId, { ...input, colors }, candidates);
 }
 
+export function updateY2InventoryQuantity(
+  user: UserAccount,
+  cellId: number,
+  quantity: number,
+): import("@temu-analytics/shared").Y2InventoryQuantityUpdateResult {
+  if (!Number.isInteger(quantity) || quantity < 0) throw new Error("库存数量必须是非负整数。");
+  const cell = database.prepare(
+    `SELECT cell.id, color.inventory_product_id AS product_id
+     FROM y2_inventory_cells cell
+     JOIN y2_inventory_colors color ON color.id = cell.color_row_id
+     WHERE cell.id = ?`,
+  ).get(cellId) as { id: number; product_id: number } | undefined;
+  if (!cell) throw new Error("库存单元格不存在。");
+  ensureInventoryAccess(user, cell.product_id);
+
+  const update = database.transaction(() => {
+    const before = getY2Inventory(cell.product_id, user);
+    database.prepare(
+      "UPDATE y2_inventory_cells SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+    ).run(quantity, cellId);
+    const after = getY2Inventory(cell.product_id, user);
+    const color = after.colors.find((item) => item.cells.some((itemCell) => itemCell.id === cellId));
+    writeChangeLog(
+      "update",
+      cell.product_id,
+      after.productCode ?? after.spu ?? "",
+      user.id,
+      before,
+      after,
+    );
+    return {
+      inventoryProductId: cell.product_id,
+      cellId,
+      quantity,
+      totalQuantity: after.totalQuantity,
+      colorTotalQuantity: color?.totalQuantity ?? 0,
+    };
+  });
+  return update();
+}
+
 export function saveY2Inventory(
   user: UserAccount,
   input: Y2InventoryRecordInput,
@@ -619,6 +661,8 @@ export function getY2Inventory(id: number, user?: UserAccount): Y2InventoryRecor
 export function deleteY2Inventory(user: UserAccount, id: number): void {
   ensureInventoryAccess(user, id);
   const remove = database.transaction(() => {
+    // 兼容同步前产生的历史脏数据：删除库存前先释放已失效订单的配货占用。
+    releaseInactiveZhihouStockPicks();
     const before = getY2Inventory(id, user);
     const pending = database
       .prepare(
@@ -733,27 +777,34 @@ export function getY2InventoryBindingOptions(
   inventoryProductId?: number,
 ): Y2InventoryBindingOptions {
   const resolved = resolveInventorySpus(spu, productCode, inventoryProductId);
-  const candidates = mergeLifecycleCandidates(resolved.spus);
+  const spuOptions = resolved.spus.map((spuValue) => {
+    const candidates = lifecycleCandidates(spuValue);
+    return {
+      spu: spuValue,
+      skcs: candidates.skcs.map((skc) => ({
+        rowId: skc.row_id,
+        id: skc.skc_id,
+        code: skc.skc_code,
+        label: jsonAttributeValues(skc.attribute_json).join(" / ") || skc.skc_code || skc.skc_id || `SKC ${skc.row_id}`,
+        imageUrl: skc.image_url,
+        skus: candidates.skus
+          .filter((sku) => sku.skc_row_id === skc.row_id)
+          .map((sku) => ({
+            rowId: sku.row_id,
+            id: sku.sku_id,
+            code: sku.sku_code,
+            label: sku.size_name || jsonAttributeValues(sku.specification_json).join(" / ") || sku.sku_code || sku.sku_id || `SKU ${sku.row_id}`,
+            imageUrl: null,
+          })),
+      })),
+    };
+  });
   return {
     spu: resolved.spus[0]!,
     resolvedFromProductCode: resolved.resolvedFromProductCode,
     ...(resolved.spus.length > 1 ? { availableSpus: resolved.spus } : {}),
-    skcs: candidates.skcs.map((skc) => ({
-      rowId: skc.row_id,
-      id: skc.skc_id,
-      code: skc.skc_code,
-      label: jsonAttributeValues(skc.attribute_json).join(" / ") || skc.skc_code || skc.skc_id || `SKC ${skc.row_id}`,
-      imageUrl: skc.image_url,
-      skus: candidates.skus
-        .filter((sku) => sku.skc_row_id === skc.row_id)
-        .map((sku) => ({
-          rowId: sku.row_id,
-          id: sku.sku_id,
-          code: sku.sku_code,
-          label: sku.size_name || jsonAttributeValues(sku.specification_json).join(" / ") || sku.sku_code || sku.sku_id || `SKU ${sku.row_id}`,
-          imageUrl: null,
-        })),
-    })),
+    spuOptions,
+    skcs: spuOptions[0]?.skcs ?? [],
   };
 }
 
@@ -864,28 +915,21 @@ export function listY2InventoryChangeLogs(user?: UserAccount): Y2InventoryChange
 export function zhihouInventoryPickOptions(input: {
   productManagementRecordId: number | null;
   productCodes: string[];
+  targetSpu: string | null;
   targetSkcRowId: number | null;
   targetColor: string;
   targetSize: string;
   targetKey: string;
 }): ZhihouInventoryPickOption[] {
-  if (!hasTable("y2_inventory_cells") || !hasTable("zhihou_size_conversion_options")) return [];
-  const codes = input.productCodes.map((value) => value.trim().toUpperCase()).filter(Boolean);
-  const conditions: string[] = [];
-  const parameters: Array<number | string> = [];
-  if (input.productManagementRecordId) {
-    conditions.push("product.product_management_record_id = ?");
-    parameters.push(input.productManagementRecordId);
-  }
-  if (codes.length) {
-    conditions.push(`EXISTS (
-      SELECT 1 FROM y2_inventory_product_codes code
-      WHERE code.inventory_product_id = product.id
-        AND UPPER(TRIM(code.product_code)) IN (${codes.map(() => "?").join(", ")})
-    )`);
-    parameters.push(...codes);
-  }
-  if (!conditions.length) return [];
+  if (!hasTable("y2_inventory_cells") || !hasTable("zhihou_size_conversion_options") || !hasTable("y2_inventory_product_spus")) return [];
+  const targetSpu = input.targetSpu?.trim().toUpperCase() ?? "";
+  if (!targetSpu) return [];
+  const conditions: string[] = [`EXISTS (
+    SELECT 1 FROM y2_inventory_product_spus inventory_spu
+    WHERE inventory_spu.inventory_product_id = product.id
+      AND UPPER(TRIM(inventory_spu.spu)) = ?
+  )`];
+  const parameters: Array<number | string> = [targetSpu];
   const colorCondition = input.targetSkcRowId === null
     ? "color.normalized_color = ?"
     : "color.skc_row_id = ?";

@@ -38,6 +38,8 @@ const idSchema = z.coerce.number().int().positive();
 const createSchema = z.object({
   name: z.string().trim().min(1).max(100),
   accountLabel: z.string().trim().min(1).max(200),
+  loginAccount: z.string().trim().max(320).optional(),
+  loginPassword: z.string().max(200).optional(),
   locale: z.string().trim().min(2).max(30).default("zh-CN"),
   timezone: z.string().trim().min(2).max(100).default("Asia/Shanghai"),
   enabled: z.boolean().default(true),

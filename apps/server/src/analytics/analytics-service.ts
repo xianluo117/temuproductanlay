@@ -21,6 +21,7 @@ interface MetricRow {
   orders: number;
   detail_paid_buyers: number;
   detail_payment_conversion_rate: number | null;
+  click_order_conversion_rate: number | null;
   impression_order_conversion_rate: number | null;
   search_impressions: number;
   file_name: string | null;
@@ -67,6 +68,7 @@ function mapTotals(row?: TotalRow): MetricTotals {
       value.detail_paid_buyers,
       value.cart_users,
     ),
+    clickOrderConversionRate: divide(value.orders, value.clicks),
     impressionOrderConversionRate: divide(value.orders, value.impressions),
   };
 }
@@ -87,6 +89,7 @@ function mapProduct(row: MetricRow): ProductSummary {
     orders: row.orders,
     detailPaidBuyers: row.detail_paid_buyers,
     detailPaymentConversionRate: row.detail_payment_conversion_rate,
+    clickOrderConversionRate: row.click_order_conversion_rate,
     impressionOrderConversionRate: row.impression_order_conversion_rate,
     searchImpressions: row.search_impressions,
     clickThroughRate: divide(row.clicks, row.impressions),
@@ -107,9 +110,12 @@ const totalSql = `
   FROM daily_metrics WHERE shop_profile_id = ? AND data_date = ?`;
 
 const productSelect = `
-  SELECT m.data_date, m.spu, m.first_listed_at, m.impressions, m.clicks, m.visitors,
+  SELECT m.data_date, m.spu,
+    COALESCE(m.first_listed_at, p.first_listed_at) AS first_listed_at,
+    m.impressions, m.clicks, m.visitors,
     m.cart_users, m.orders, m.detail_paid_buyers, m.detail_payment_conversion_rate,
-    m.impression_order_conversion_rate, m.search_impressions, a.file_name, a.source_type
+    m.click_order_conversion_rate, m.impression_order_conversion_rate,
+    m.search_impressions, a.file_name, a.source_type
   FROM daily_metrics m
   JOIN products p ON p.shop_profile_id = m.shop_profile_id AND p.spu = m.spu
   LEFT JOIN image_assets a ON a.id = p.image_asset_id`;
@@ -214,6 +220,7 @@ export function getProducts(
     searchImpressions: "m.search_impressions",
     spu: "m.spu",
     detailPaymentConversionRate: "m.detail_payment_conversion_rate",
+    clickOrderConversionRate: "m.click_order_conversion_rate",
     impressionOrderConversionRate: "m.impression_order_conversion_rate",
   };
   const sortColumn = allowedSort[options.sort ?? "orders"] ?? "m.orders";

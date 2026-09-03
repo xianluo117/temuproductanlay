@@ -128,12 +128,13 @@ export function ProductDetailPage() {
   const compare = (value: number, old?: number) => !old ? '-' : `${((value - old) / old * 100).toFixed(1)}%`;
   const option = { tooltip: { trigger: 'axis' }, legend: {}, grid: { left: 55, right: 30, top: 45, bottom: 35 }, xAxis: { type: 'category', data: data.history.map((item) => item.date.slice(5)) }, yAxis: { type: 'value' }, series: metrics.map((metric) => ({ name: metricOptions.find((item) => item.value === metric)?.label, type: metric === 'orders' ? 'bar' : 'line', smooth: true, data: data.history.map((item) => item[metric as keyof ProductSummary] as number) })) };
   const rateOption = { tooltip: { trigger: 'axis', valueFormatter: (value: number) => `${(value * 100).toFixed(2)}%` }, legend: {}, xAxis: { type: 'category', data: data.history.map((item) => item.date.slice(5)) }, yAxis: { type: 'value', axisLabel: { formatter: (value: number) => `${(value * 100).toFixed(0)}%` } }, series: [
-    { name: '点击率', type: 'line', data: data.history.map((item) => item.clickThroughRate) }, { name: '加购率', type: 'line', data: data.history.map((item) => item.cartRate) }, { name: '曝光订单转化', type: 'line', data: data.history.map((item) => item.impressionOrderConversionRate) },
+    { name: '点击率', type: 'line', data: data.history.map((item) => item.clickThroughRate) }, { name: '加购率', type: 'line', data: data.history.map((item) => item.cartRate) }, { name: '商详支付转化', type: 'line', data: data.history.map((item) => item.detailPaymentConversionRate) }, { name: '点击订单转化', type: 'line', data: data.history.map((item) => item.clickOrderConversionRate) }, { name: '曝光订单转化', type: 'line', data: data.history.map((item) => item.impressionOrderConversionRate) },
   ] };
   const columns = [
     { title: '日期', dataIndex: 'date' }, { title: '曝光', dataIndex: 'impressions' }, { title: '点击', dataIndex: 'clicks' },
     { title: '点击率', dataIndex: 'clickThroughRate', render: percent }, { title: '访客', dataIndex: 'visitors' },
     { title: '加购', dataIndex: 'cartUsers' }, { title: '订单', dataIndex: 'orders' }, { title: '支付买家', dataIndex: 'detailPaidBuyers' },
+    { title: '商详支付转化', dataIndex: 'detailPaymentConversionRate', render: percent }, { title: '点击订单转化', dataIndex: 'clickOrderConversionRate', render: percent },
     { title: '曝光订单转化', dataIndex: 'impressionOrderConversionRate', render: percent },
   ];
   const operationColumns: TableColumnsType<ProductOperationRecord> = [

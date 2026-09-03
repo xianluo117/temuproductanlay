@@ -50,6 +50,145 @@ afterAll(() => {
 });
 
 describe("Temu 流量图片关联", () => {
+  it("识别流量接口返回的首次加入站点时间，并保留已有日期", () => {
+    const dateSpu = `${spu}-DATE`;
+    const page = {
+      syncId,
+      pageNumber: 1,
+      pageSize: 50,
+      total: 1,
+      totalPages: 1,
+      requestBody: {},
+      httpStatus: 200,
+      durationMs: 10,
+      payload: {},
+      items: [{
+        spu: dateSpu,
+        dataDate: "2099-02-02",
+        firstBindSiteTimeStr: "2026-05-07 14:30:04.316",
+        firstBindSiteTime: 1778135404000,
+      }],
+    };
+    storeTrafficPage(shopId, page);
+
+    const values = database
+      .prepare(
+        `SELECT p.first_listed_at AS product_date,
+                m.first_listed_at AS metric_date
+         FROM products p
+         JOIN daily_metrics m
+           ON m.shop_profile_id = p.shop_profile_id AND m.spu = p.spu
+         WHERE p.shop_profile_id = ? AND p.spu = ?`,
+      )
+      .get(shopId, dateSpu) as { product_date: string; metric_date: string };
+    expect(values).toEqual({
+      product_date: "2026-05-07",
+      metric_date: "2026-05-07",
+    });
+
+    storeTrafficPage(shopId, {
+      ...page,
+      items: [{ spu: dateSpu, dataDate: "2099-02-03" }],
+    });
+    const preserved = database
+      .prepare("SELECT first_listed_at FROM products WHERE shop_profile_id = ? AND spu = ?")
+      .get(shopId, dateSpu) as { first_listed_at: string };
+    expect(preserved.first_listed_at).toBe("2026-05-07");
+  });
+
+  it("映射 Temu 商品流量字段并计算加购率所需数据", () => {
+    const metricSpu = `${spu}-METRIC`;
+    storeTrafficPage(shopId, {
+      syncId,
+      pageNumber: 1,
+      pageSize: 50,
+      total: 1,
+      totalPages: 1,
+      requestBody: {},
+      httpStatus: 200,
+      durationMs: 10,
+      payload: {},
+      items: [{
+        spu: metricSpu,
+        dataDate: "2099-02-03",
+        goodsVisitorsUserNum: 156,
+        cartCrtUserNum: 23,
+        fullPaymentUserNum: 13,
+        businessDetailPaymentUserNum: 6,
+        searchExposeNum: 632,
+      }],
+    });
+
+    const values = database
+      .prepare(
+        `SELECT visitors, cart_users, detail_paid_buyers, search_impressions
+         FROM daily_metrics WHERE shop_profile_id = ? AND spu = ?`,
+      )
+      .get(shopId, metricSpu) as {
+      visitors: number;
+      cart_users: number;
+      detail_paid_buyers: number;
+      search_impressions: number;
+    };
+    expect(values).toEqual({
+      visitors: 156,
+      cart_users: 23,
+      detail_paid_buyers: 13,
+      search_impressions: 632,
+    });
+  });
+
+  it("优先使用 Temu 的完成付款用户数作为支付买家", () => {
+    const paidSpu = `${spu}-PAID`;
+    storeTrafficPage(shopId, {
+      syncId, pageNumber: 1, pageSize: 50, total: 1, totalPages: 1,
+      requestBody: {}, httpStatus: 200, durationMs: 10, payload: {},
+      items: [{ spu: paidSpu, dataDate: "2099-02-05", fullPaymentUserNum: 13, businessDetailPaymentUserNum: 6 }],
+    });
+    const row = database.prepare("SELECT detail_paid_buyers FROM daily_metrics WHERE shop_profile_id = ? AND spu = ?").get(shopId, paidSpu) as { detail_paid_buyers: number };
+    expect(row.detail_paid_buyers).toBe(13);
+  });
+
+  it("分别存储 Temu 的商详支付、点击订单和曝光订单转化率", () => {
+    const rateSpu = `${spu}-RATE`;
+    storeTrafficPage(shopId, {
+      syncId,
+      pageNumber: 1,
+      pageSize: 50,
+      total: 1,
+      totalPages: 1,
+      requestBody: {},
+      httpStatus: 200,
+      durationMs: 10,
+      payload: {},
+      items: [{
+        spu: rateSpu,
+        dataDate: "2099-02-04",
+        impressionCount: 323,
+        clickCount: 32,
+        orderPayOrderNum: 3,
+        businessDetailPaymentUserRate: 2.5,
+        clickOrderRatio: 9.375,
+        orderPayImpressionRate: 0.928792569659443,
+      }],
+    });
+
+    const rates = database
+      .prepare(
+        `SELECT detail_payment_conversion_rate, click_order_conversion_rate,
+                impression_order_conversion_rate
+         FROM daily_metrics WHERE shop_profile_id = ? AND spu = ?`,
+      )
+      .get(shopId, rateSpu) as {
+      detail_payment_conversion_rate: number;
+      click_order_conversion_rate: number;
+      impression_order_conversion_rate: number;
+    };
+    expect(rates.detail_payment_conversion_rate).toBeCloseTo(0.025);
+    expect(rates.click_order_conversion_rate).toBeCloseTo(0.09375);
+    expect(rates.impression_order_conversion_rate).toBeCloseTo(3 / 323);
+  });
+
   it("按店铺和 SPU 创建全局下载目标，并复用同 URL 任务", () => {
     const page = {
       syncId,

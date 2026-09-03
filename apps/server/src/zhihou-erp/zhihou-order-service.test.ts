@@ -259,14 +259,12 @@ function createInventorySpecification(input: {
     ).run(productId, input.productCode);
   }
   if (database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'y2_inventory_product_spus'").get()) {
+    const recordSpu = database.prepare(
+      "SELECT link.spu FROM product_management_spu_links link WHERE link.record_id = ? AND TRIM(COALESCE(link.spu, '')) <> '' ORDER BY link.id LIMIT 1",
+    ).get(input.recordId) as { spu: string } | undefined;
     database.prepare(
       "INSERT OR IGNORE INTO y2_inventory_product_spus (inventory_product_id, spu) VALUES (?, ?)",
-    ).run(productId, `TEST-SPU-${input.productCode}`);
-  }
-  if (database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'y2_inventory_product_spus'").get()) {
-    database.prepare(
-      "INSERT OR IGNORE INTO y2_inventory_product_spus (inventory_product_id, spu) VALUES (?, ?)",
-    ).run(productId, `TEST-SPU-${input.productCode}`);
+    ).run(productId, recordSpu?.spu ?? `TEST-SPU-${input.productCode}`);
   }
   createdInventoryProductIds.push(productId);
   const colorRowId = Number(database.prepare(
@@ -414,6 +412,131 @@ describe("智猴凭据与新订单汇总", () => {
     expect(database.prepare(
       "SELECT 1 FROM zhihou_inventory_adjustment_logs WHERE pick_item_id = ?",
     ).get(pickItemId)).toBeUndefined();
+  });
+
+  it("订单同步后自动释放已消失订单的配货占用", () => {
+    const suffix = Date.now();
+    const recordId = createProductBinding(`STALE-SKU-${suffix}`, `STALE-SPU-${suffix}`);
+    const inventoryCellId = createInventorySpecification({
+      recordId,
+      productCode: `STALE-CODE-${suffix}`,
+      color: "黑色",
+      skcRowId: null,
+      size: "L",
+      quantity: 0,
+    });
+    const productId = (database.prepare(
+      "SELECT id FROM y2_inventory_products WHERE product_code = ?",
+    ).get(`STALE-CODE-${suffix}`) as { id: number }).id;
+    const pickBatchId = Number(database.prepare(
+      "INSERT INTO zhihou_stock_pick_batches (created_by_user_id) VALUES (?)",
+    ).run(adminId()).lastInsertRowid);
+    const pickItemId = Number(database.prepare(
+      `INSERT INTO zhihou_stock_pick_items
+       (batch_id, target_key, target_zhihou_sku, target_color, target_size,
+        inventory_cell_id, source_color, source_size, picked_quantity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+    ).run(
+      pickBatchId,
+      `STALE-TARGET-${suffix}`,
+      `STALE-SKU-${suffix}`,
+      "黑色",
+      "L",
+      inventoryCellId,
+      "黑色",
+      "L",
+    ).lastInsertRowid);
+
+    const orderSnapshotId = Number(database.prepare(
+      `INSERT INTO zhihou_stock_order_snapshots
+       (order_no, required_quantity, is_active)
+       VALUES (?, 1, 1)`,
+    ).run(`STALE-ORDER-${suffix}`).lastInsertRowid);
+    database.prepare(
+      `INSERT INTO zhihou_stock_order_item_snapshots
+       (order_snapshot_id, external_item_key, target_key, target_zhihou_sku,
+        target_color, target_size, required_quantity)
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+    ).run(
+      orderSnapshotId,
+      `STALE-ITEM-${suffix}`,
+      `STALE-TARGET-${suffix}`,
+      `STALE-SKU-${suffix}`,
+      "黑色",
+      "L",
+    );
+    database.prepare(
+      "UPDATE zhihou_stock_order_snapshots SET is_active = 0 WHERE id = ?",
+    ).run(orderSnapshotId);
+
+    deleteY2Inventory(adminUser(), productId);
+
+    expect(database.prepare("SELECT 1 FROM y2_inventory_products WHERE id = ?").get(productId)).toBeUndefined();
+    expect(database.prepare("SELECT 1 FROM zhihou_stock_pick_items WHERE id = ?").get(pickItemId)).toBeUndefined();
+  });
+
+  it("订单同步清理时不返还已修正库存", () => {
+    const suffix = Date.now();
+    const recordId = createProductBinding(`STALE-ADJUSTED-SKU-${suffix}`, `STALE-ADJUSTED-SPU-${suffix}`);
+    const inventoryCellId = createInventorySpecification({
+      recordId,
+      productCode: `STALE-ADJUSTED-CODE-${suffix}`,
+      color: "黑色",
+      skcRowId: null,
+      size: "L",
+      quantity: 7,
+    });
+    const pickBatchId = Number(database.prepare(
+      "INSERT INTO zhihou_stock_pick_batches (created_by_user_id) VALUES (?)",
+    ).run(adminId()).lastInsertRowid);
+    const pickItemId = Number(database.prepare(
+      `INSERT INTO zhihou_stock_pick_items
+       (batch_id, target_key, target_zhihou_sku, target_color, target_size,
+        inventory_cell_id, source_color, source_size, picked_quantity,
+        matched_quantity, adjusted_quantity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 3, 3, 3)`,
+    ).run(
+      pickBatchId,
+      `STALE-ADJUSTED-TARGET-${suffix}`,
+      `STALE-ADJUSTED-SKU-${suffix}`,
+      "黑色",
+      "L",
+      inventoryCellId,
+      "黑色",
+      "L",
+    ).lastInsertRowid);
+    database.prepare("UPDATE y2_inventory_cells SET quantity = 4 WHERE id = ?").run(inventoryCellId);
+    database.prepare(
+      `INSERT INTO zhihou_inventory_adjustment_logs
+       (pick_item_id, inventory_cell_id, quantity, before_quantity, after_quantity, adjusted_by_user_id)
+       VALUES (?, ?, 3, 7, 4, ?)`,
+    ).run(pickItemId, inventoryCellId, adminId());
+
+    const orderSnapshotId = Number(database.prepare(
+      `INSERT INTO zhihou_stock_order_snapshots (order_no, required_quantity, is_active)
+       VALUES (?, 1, 0)`,
+    ).run(`STALE-ADJUSTED-ORDER-${suffix}`).lastInsertRowid);
+    database.prepare(
+      `INSERT INTO zhihou_stock_order_item_snapshots
+       (order_snapshot_id, external_item_key, target_key, target_zhihou_sku,
+        target_color, target_size, required_quantity)
+       VALUES (?, ?, ?, ?, ?, ?, 1)`,
+    ).run(
+      orderSnapshotId,
+      `STALE-ADJUSTED-ITEM-${suffix}`,
+      `STALE-ADJUSTED-TARGET-${suffix}`,
+      `STALE-ADJUSTED-SKU-${suffix}`,
+      "黑色",
+      "L",
+    );
+
+    const productId = (database.prepare(
+      "SELECT id FROM y2_inventory_products WHERE product_code = ?",
+    ).get(`STALE-ADJUSTED-CODE-${suffix}`) as { id: number }).id;
+    deleteY2Inventory(adminUser(), productId);
+
+    expect(database.prepare("SELECT 1 FROM y2_inventory_products WHERE id = ?").get(productId)).toBeUndefined();
+    expect(database.prepare("SELECT 1 FROM zhihou_stock_pick_items WHERE id = ?").get(pickItemId)).toBeUndefined();
   });
 
   it("允许删除已完成库存修正的Y2库存并清理历史关联", () => {
@@ -812,6 +935,7 @@ describe("智猴凭据与新订单汇总", () => {
     expect(zhihouInventoryPickOptions({
       productManagementRecordId: recordId,
       productCodes: [`ZH-TEST-${sku}`],
+      targetSpu: parentSpu,
       targetSkcRowId: target.skcRowId,
       targetColor: "粉红色",
       targetSize: "L",
@@ -821,7 +945,8 @@ describe("智猴凭据与新订单汇总", () => {
 
   it("目标SKC缺失时仍按同名颜色回退生成改码候选", () => {
     const sku = `PICK-COLOR-FALLBACK-${Date.now()}`;
-    const recordId = createProductBinding(sku, `PARENT-SPU-PICK-FALLBACK-${Date.now()}`);
+    const parentSpu = `PARENT-SPU-PICK-FALLBACK-${Date.now()}`;
+    const recordId = createProductBinding(sku, parentSpu);
     createInventorySpecification({
       recordId,
       productCode: `ZH-TEST-${sku}`,
@@ -834,6 +959,7 @@ describe("智猴凭据与新订单汇总", () => {
     expect(zhihouInventoryPickOptions({
       productManagementRecordId: recordId,
       productCodes: [`ZH-TEST-${sku}`],
+      targetSpu: parentSpu,
       targetSkcRowId: null,
       targetColor: "黑色",
       targetSize: "L",

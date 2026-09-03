@@ -53,6 +53,7 @@ export type MetricKey =
   | "orders"
   | "detailPaidBuyers"
   | "detailPaymentConversionRate"
+  | "clickOrderConversionRate"
   | "impressionOrderConversionRate"
   | "searchImpressions";
 
@@ -67,6 +68,7 @@ export interface DailyMetric {
   orders: number;
   detailPaidBuyers: number;
   detailPaymentConversionRate: number | null;
+  clickOrderConversionRate: number | null;
   impressionOrderConversionRate: number | null;
   searchImpressions: number;
 }
@@ -93,6 +95,7 @@ export interface MetricTotals {
   clickThroughRate: number | null;
   cartRate: number | null;
   detailPaymentConversionRate: number | null;
+  clickOrderConversionRate: number | null;
   impressionOrderConversionRate: number | null;
 }
 
@@ -304,6 +307,8 @@ export interface TemuShopProfile {
   id: number;
   name: string;
   accountLabel: string;
+  loginAccount: string | null;
+  hasLoginPassword: boolean;
   profileKey: string;
   mallId: string | null;
   cdpPort: number;
@@ -325,7 +330,9 @@ export interface TemuShopProfile {
 export interface TemuShopProfileCreateInput {
   name: string;
   accountLabel: string;
-  locale?: string;
+  loginAccount?: string | undefined;
+  loginPassword?: string | undefined;
+  locale?: string | undefined;
   timezone?: string;
   enabled?: boolean;
   grantedUserIds?: number[];
@@ -334,6 +341,8 @@ export interface TemuShopProfileCreateInput {
 export interface TemuShopProfileUpdateInput {
   name?: string | undefined;
   accountLabel?: string | undefined;
+  loginAccount?: string | undefined;
+  loginPassword?: string | undefined;
   locale?: string | undefined;
   timezone?: string | undefined;
   enabled?: boolean | undefined;
@@ -568,6 +577,18 @@ export interface Y2InventoryCellInput {
   skuRowId?: number | null | undefined;
 }
 
+export interface Y2InventoryQuantityUpdateInput {
+  quantity: number;
+}
+
+export interface Y2InventoryQuantityUpdateResult {
+  inventoryProductId: number;
+  cellId: number;
+  quantity: number;
+  totalQuantity: number;
+  colorTotalQuantity: number;
+}
+
 export interface Y2InventorySpuSpecInput {
   spu: string;
   skcRowId: number | null;
@@ -619,10 +640,20 @@ export interface Y2InventoryBindingCandidate {
   imageUrl: string | null;
 }
 
+export interface Y2InventoryBindingSpuOptions {
+  spu: string;
+  skcs: Array<Y2InventoryBindingCandidate & {
+    skus: Y2InventoryBindingCandidate[];
+  }>;
+}
+
 export interface Y2InventoryBindingOptions {
   spu: string;
   resolvedFromProductCode: boolean;
   availableSpus?: string[];
+  /** 按 SPU 分组的生命周期规格，避免多个 SPU 的 SKC/SKU 混用。 */
+  spuOptions?: Y2InventoryBindingSpuOptions[];
+  /** 兼容旧前端：当前首个 SPU 的规格列表。 */
   skcs: Array<Y2InventoryBindingCandidate & {
     skus: Y2InventoryBindingCandidate[];
   }>;
@@ -666,6 +697,8 @@ export type ProductManagementImageStatus =
 export interface ProductManagementSpuLink {
   id: number;
   spu: string | null;
+  /** SPU 数据导入的首次加入站点时间。 */
+  firstListedAt: string | null;
   note: string | null;
   localImageUrl: string | null;
   remoteImageUrl: string | null;
@@ -718,6 +751,11 @@ export interface ProductManagementRecord {
   updatedAt: string;
 }
 
+export interface ProductManagementBySpuResponse {
+  spu: string;
+  records: ProductManagementRecord[];
+}
+
 export interface ProductManagementBindingInput {
   skcId: string | null;
   skuId: string | null;
@@ -754,6 +792,7 @@ export const PRODUCT_MANAGEMENT_COLUMN_KEYS = [
   "profitThresholdPrice",
   "recommendedPrice",
   "spu",
+  "firstListedAt",
   "spuNote",
   "initialReviewPrice",
   "reviewPrice",
@@ -921,6 +960,7 @@ export interface ZhihouStockPickItem {
 
 export interface ZhihouAllocatedOrderItem {
   pickItemId: number;
+  productCode: string;
   targetZhihouSku: string;
   targetColor: string;
   targetSize: string;
@@ -931,6 +971,7 @@ export interface ZhihouAllocatedOrderItem {
 
 export interface ZhihouAllocatedOrder {
   orderNo: string;
+  productCodes: string[];
   submittedAt: string | null;
   requiredQuantity: number;
   allocatedQuantity: number;

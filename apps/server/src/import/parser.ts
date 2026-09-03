@@ -193,6 +193,7 @@ export async function parseTemuWorkbook(filePath: string, fileName: string): Pro
       orders: parseNonNegativeInteger(row.getCell(9).value, rowNumber, '订单量', issues),
       detailPaidBuyers: parseNonNegativeInteger(row.getCell(10).value, rowNumber, '商详支付买家数', issues),
       detailPaymentConversionRate: parseRate(row.getCell(11).value, rowNumber, '商详支付转化率', issues),
+      clickOrderConversionRate: null,
       impressionOrderConversionRate: parseRate(row.getCell(12).value, rowNumber, '曝光订单转化率', issues),
       searchImpressions: parseNonNegativeInteger(row.getCell(13).value, rowNumber, '（曝光量）搜索数据', issues),
     });

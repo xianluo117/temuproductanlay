@@ -254,14 +254,40 @@ function textValue(
   return null;
 }
 
-function numberValue(item: Record<string, unknown>, keys: string[]): number {
-  const text = textValue(item, keys)?.replace(/,/g, "").replace(/%$/, "");
-  if (!text) return 0;
-  const value = Number(text);
-  return Number.isFinite(value) && value >= 0 ? Math.round(value) : 0;
+function firstListedAtValue(item: Record<string, unknown>): string | null {
+  const raw = textValue(item, [
+    "firstBindSiteTimeStr",
+    "firstSiteTime",
+    "firstListedAt",
+    "joinSiteTime",
+  ]);
+  if (raw) {
+    const date = raw.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+    if (date) return date;
+  }
+
+  const timestamp = item.firstBindSiteTime;
+  if (typeof timestamp === "number" && Number.isFinite(timestamp)) {
+    const date = new Date(timestamp);
+    if (!Number.isNaN(date.getTime())) return date.toISOString().slice(0, 10);
+  }
+  return null;
 }
 
-function rateValue(
+function numberValue(item: Record<string, unknown>, keys: string[]): number {
+  for (const key of keys) {
+    const raw = item[key];
+    if (raw === null || raw === undefined || raw === "") continue;
+    const text = String(raw).replace(/,/g, "").replace(/%$/, "").trim();
+    if (!text) continue;
+    const value = Number(text);
+    if (Number.isFinite(value) && value >= 0) return Math.round(value);
+  }
+  return 0;
+}
+
+/** Temu 流量接口的百分比字段均按百分数返回，例如 0.9288 表示 0.9288%。 */
+function temuPercentageValue(
   item: Record<string, unknown>,
   keys: string[],
 ): number | null {
@@ -269,7 +295,7 @@ function rateValue(
   if (!raw) return null;
   const value = Number(raw.replace("%", ""));
   if (!Number.isFinite(value) || value < 0) return null;
-  return raw.includes("%") || value > 1 ? value / 100 : value;
+  return value / 100;
 }
 
 function normalizeDate(raw: string | null): string {
@@ -461,6 +487,39 @@ export function storeLifecyclePage(shopId: number, page: LifecyclePage): void {
         throw new Error(`生命周期 SPU 写入后无法读取主键：${spu}`);
       }
       if (existingSpu && existingSpu.sync_batch_id !== page.syncId) {
+        const beforeDelete = database
+          .prepare(
+            `SELECT
+               (SELECT COUNT(*) FROM temu_lifecycle_skc_current WHERE spu_row_id = ?) AS skc_count,
+               (SELECT COUNT(*) FROM temu_lifecycle_sku_current sku
+                JOIN temu_lifecycle_skc_current skc ON skc.id = sku.skc_row_id
+                WHERE skc.spu_row_id = ?) AS sku_count,
+               (SELECT COUNT(*) FROM y2_inventory_colors color
+                WHERE color.skc_row_id IN (
+                  SELECT id FROM temu_lifecycle_skc_current WHERE spu_row_id = ?
+                )) AS inventory_skc_refs,
+               (SELECT COUNT(*) FROM y2_inventory_cells cell
+                WHERE cell.sku_row_id IN (
+                  SELECT sku.id
+                  FROM temu_lifecycle_sku_current sku
+                  JOIN temu_lifecycle_skc_current skc ON skc.id = sku.skc_row_id
+                  WHERE skc.spu_row_id = ?
+                )) AS inventory_sku_refs`,
+          )
+          .get(spuId, spuId, spuId, spuId) as {
+            skc_count: number;
+            sku_count: number;
+            inventory_skc_refs: number;
+            inventory_sku_refs: number;
+          };
+        console.warn("[LifecycleSync] replacing lifecycle SKC/SKU rows; Y2 foreign-key refs may be nulled", {
+          shopId,
+          syncId: page.syncId,
+          spu,
+          spuId,
+          previousSyncId: existingSpu.sync_batch_id,
+          ...beforeDelete,
+        });
         deleteSkcs.run(spuId);
       }
       spuCount += 1;
@@ -549,6 +608,103 @@ export function storeLifecyclePage(shopId: number, page: LifecyclePage): void {
       .run(page.totalPages, spuCount, skcCount, skuCount, page.syncId, shopId);
   });
   transaction();
+  restoreY2InventoryBindings(
+    shopId,
+    page.items.map((item) => lifecycleSpu(item)).filter((value): value is string => Boolean(value)),
+  );
+}
+
+function restoreY2InventoryBindings(shopId: number, spus: string[]): void {
+  const normalizedSpus = [...new Set(
+    spus.map((value) => value.trim().toUpperCase()).filter(Boolean),
+  )];
+  if (!normalizedSpus.length) return;
+
+  const placeholders = normalizedSpus.map(() => "?").join(", ");
+  const restore = database.transaction(() => {
+    const products = database.prepare(
+      `SELECT id, spu FROM y2_inventory_products
+       WHERE UPPER(TRIM(COALESCE(spu, ''))) IN (${placeholders})`,
+    ).all(...normalizedSpus) as Array<{ id: number; spu: string | null }>;
+    const spusByProductId = new Map(products.map((product) => [product.id, product.spu?.trim().toUpperCase() ?? ""]));
+    const skcs = database.prepare(
+      `SELECT lifecycle_skc.id AS row_id, lifecycle_spu.spu, lifecycle_skc.skc_id, lifecycle_skc.skc_code
+       FROM temu_lifecycle_skc_current lifecycle_skc
+       JOIN temu_lifecycle_spu_current lifecycle_spu ON lifecycle_spu.id = lifecycle_skc.spu_row_id
+       WHERE UPPER(TRIM(lifecycle_spu.spu)) IN (${placeholders})`,
+    ).all(...normalizedSpus) as Array<{ row_id: number; spu: string; skc_id: string | null; skc_code: string | null }>;
+    const skcByIdentity = new Map<string, number>();
+    for (const skc of skcs) {
+      for (const value of [skc.skc_id, skc.skc_code]) {
+        if (value?.trim()) skcByIdentity.set(`${skc.spu.trim().toUpperCase()}\u0000${value.trim().toUpperCase()}`, skc.row_id);
+      }
+    }
+
+    const colors = database.prepare(
+      `SELECT id, inventory_product_id, skc_id, skc_code
+       FROM y2_inventory_colors
+       WHERE inventory_product_id IN (${products.map(() => "?").join(", ") || "NULL"})`,
+    ).all(...products.map((product) => product.id)) as Array<{ id: number; inventory_product_id: number; skc_id: string | null; skc_code: string | null }>;
+    const updateColor = database.prepare(
+      `UPDATE y2_inventory_colors
+       SET skc_row_id = ?, match_status = ?, match_message = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    );
+    for (const color of colors) {
+      const spu = spusByProductId.get(color.inventory_product_id) ?? "";
+      const rowId = [color.skc_id, color.skc_code]
+        .map((value) => value?.trim().toUpperCase())
+        .filter(Boolean)
+        .map((value) => skcByIdentity.get(`${spu}\u0000${value}`))
+        .find((value): value is number => value !== undefined) ?? null;
+      updateColor.run(rowId, rowId ? "matched" : "unmatched", rowId ? null : "生命周期同步后未找到原SKC", color.id);
+    }
+
+    const skus = database.prepare(
+      `SELECT cell.id, cell.sku_id, cell.sku_code, color.skc_id, color.skc_code,
+              color.inventory_product_id
+       FROM y2_inventory_cells cell
+       JOIN y2_inventory_colors color ON color.id = cell.color_row_id
+       WHERE color.inventory_product_id IN (${products.map(() => "?").join(", ") || "NULL"})`,
+    ).all(...products.map((product) => product.id)) as Array<{
+      id: number; sku_id: string | null; sku_code: string | null;
+      skc_id: string | null; skc_code: string | null; inventory_product_id: number;
+    }>;
+    const skuRows = database.prepare(
+      `SELECT lifecycle_sku.id AS row_id, lifecycle_spu.spu,
+              lifecycle_skc.skc_id, lifecycle_skc.skc_code,
+              lifecycle_sku.sku_id, lifecycle_sku.sku_code
+       FROM temu_lifecycle_sku_current lifecycle_sku
+       JOIN temu_lifecycle_skc_current lifecycle_skc ON lifecycle_skc.id = lifecycle_sku.skc_row_id
+       JOIN temu_lifecycle_spu_current lifecycle_spu ON lifecycle_spu.id = lifecycle_skc.spu_row_id
+       WHERE UPPER(TRIM(lifecycle_spu.spu)) IN (${placeholders})`,
+    ).all(...normalizedSpus) as Array<{
+      row_id: number; spu: string; skc_id: string | null; skc_code: string | null;
+      sku_id: string | null; sku_code: string | null;
+    }>;
+    const skuByIdentity = new Map<string, number>();
+    for (const sku of skuRows) {
+      for (const value of [sku.sku_id, sku.sku_code]) {
+        if (value?.trim()) skuByIdentity.set(`${sku.spu.trim().toUpperCase()}\u0000${sku.skc_id?.trim().toUpperCase() ?? ""}\u0000${sku.skc_code?.trim().toUpperCase() ?? ""}\u0000${value.trim().toUpperCase()}`, sku.row_id);
+      }
+    }
+    const updateCell = database.prepare(
+      `UPDATE y2_inventory_cells
+       SET sku_row_id = ?, match_status = ?, match_message = ?, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+    );
+    for (const cell of skus) {
+      const spu = spusByProductId.get(cell.inventory_product_id) ?? "";
+      const skcKey = `${spu}\u0000${cell.skc_id?.trim().toUpperCase() ?? ""}\u0000${cell.skc_code?.trim().toUpperCase() ?? ""}`;
+      const rowId = [cell.sku_id, cell.sku_code]
+        .map((value) => value?.trim().toUpperCase())
+        .filter(Boolean)
+        .map((value) => skuByIdentity.get(`${skcKey}\u0000${value}`))
+        .find((value): value is number => value !== undefined) ?? null;
+      updateCell.run(rowId, rowId ? "matched" : "unmatched", rowId ? null : "生命周期同步后未找到原SKU", cell.id);
+    }
+  });
+  restore();
 }
 
 export function reprocessLifecycleBatch(shopId: number, syncId: number): void {
@@ -751,16 +907,18 @@ export function storeTrafficPage(shopId: number, page: TrafficPage): void {
       INSERT INTO daily_metrics
       (shop_profile_id, data_date, spu, traffic_sync_batch_id, source_type,
        first_listed_at, impressions, clicks, visitors, cart_users, orders,
-       detail_paid_buyers, detail_payment_conversion_rate,
+       detail_paid_buyers, detail_payment_conversion_rate, click_order_conversion_rate,
        impression_order_conversion_rate, search_impressions, raw_item_json)
-      VALUES (?, ?, ?, ?, 'temu_api', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, 'temu_api', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(shop_profile_id, data_date, spu) DO UPDATE SET
         batch_id = NULL, traffic_sync_batch_id = excluded.traffic_sync_batch_id,
-        source_type = 'temu_api', first_listed_at = excluded.first_listed_at,
+        source_type = 'temu_api',
+        first_listed_at = COALESCE(excluded.first_listed_at, daily_metrics.first_listed_at),
         impressions = excluded.impressions, clicks = excluded.clicks,
         visitors = excluded.visitors, cart_users = excluded.cart_users,
         orders = excluded.orders, detail_paid_buyers = excluded.detail_paid_buyers,
         detail_payment_conversion_rate = excluded.detail_payment_conversion_rate,
+        click_order_conversion_rate = excluded.click_order_conversion_rate,
         impression_order_conversion_rate = excluded.impression_order_conversion_rate,
         search_impressions = excluded.search_impressions,
         raw_item_json = excluded.raw_item_json, updated_at = CURRENT_TIMESTAMP
@@ -776,11 +934,7 @@ export function storeTrafficPage(shopId: number, page: TrafficPage): void {
       ]);
       if (!spu) continue;
       const dataDate = trafficDate(item);
-      const firstListedAt = textValue(item, [
-        "firstSiteTime",
-        "firstListedAt",
-        "joinSiteTime",
-      ]);
+      const firstListedAt = firstListedAtValue(item);
       const old = previous.get(shopId, dataDate, spu) as
         | Record<string, unknown>
         | undefined;
@@ -829,20 +983,40 @@ export function storeTrafficPage(shopId: number, page: TrafficPage): void {
         firstListedAt,
         numberValue(item, ["impressionCount", "impressions"]),
         numberValue(item, ["clickCount", "clicks"]),
-        numberValue(item, ["visitorCount", "uv", "visitors"]),
-        numberValue(item, ["cartUserCount", "addCartUserCount", "cartUsers"]),
+        numberValue(item, [
+          "goodsVisitorsUserNum",
+          "visitorCount",
+          "uv",
+          "visitors",
+        ]),
+        numberValue(item, [
+          "cartCrtUserNum",
+          "cartUserCount",
+          "addCartUserCount",
+          "cartUsers",
+        ]),
         numberValue(item, ["orderPayOrderNum", "orderCount", "orders"]),
         numberValue(item, [
+          "fullPaymentUserNum",
+          "businessDetailPaymentUserNum",
           "orderPayUserNum",
           "detailPaidBuyers",
           "payBuyerCount",
         ]),
-        rateValue(item, ["clickOrderRatio", "detailPaymentConversionRate"]),
-        rateValue(item, [
+        temuPercentageValue(item, [
+          "businessDetailPaymentUserRate",
+          "detailPaymentConversionRate",
+        ]),
+        temuPercentageValue(item, ["clickOrderRatio"]),
+        temuPercentageValue(item, [
           "orderPayImpressionRate",
           "impressionOrderConversionRate",
         ]),
-        numberValue(item, ["searchImpressionCount", "searchImpressions"]),
+        numberValue(item, [
+          "searchExposeNum",
+          "searchImpressionCount",
+          "searchImpressions",
+        ]),
         JSON.stringify(item),
       );
       imported += 1;

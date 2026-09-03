@@ -11,6 +11,7 @@ import {
   getTemuShopProfile,
   resetStaleTemuBrowserRuntime,
   updateTemuShopRuntime,
+  getTemuShopCredentials,
 } from "./temu-shop-service.js";
 import { enqueueSyncIngestion } from "./sync-ingestion-queue.js";
 import {
@@ -28,6 +29,7 @@ interface WorkerMessage {
   message?: string;
   mallId?: string;
   currentUrl?: string;
+  loginAttempted?: boolean;
   syncId?: number;
   pageNumber?: number;
   pageSize?: number;
@@ -332,7 +334,9 @@ function handleWorkerMessage(shopId: number, message: WorkerMessage): void {
     updateTemuShopRuntime(shopId, status, {
       ...(message.mallId === undefined ? {} : { mallId: message.mallId }),
       error:
-        status === "ERROR" || status === "RISK_BLOCKED"
+        status === "ERROR" ||
+        status === "RISK_BLOCKED" ||
+        status === "LOGIN_REQUIRED"
           ? (message.message ?? null)
           : null,
       success: status === "READY",
@@ -344,8 +348,11 @@ function handleWorkerMessage(shopId: number, message: WorkerMessage): void {
     status ?? null,
     message.message ?? null,
     {
-      currentUrl: message.currentUrl,
-      mallId: message.mallId,
+      ...(message.currentUrl === undefined ? {} : { currentUrl: message.currentUrl }),
+      ...(message.mallId === undefined ? {} : { mallId: message.mallId }),
+      ...(message.loginAttempted === undefined
+        ? {}
+        : { loginAttempted: message.loginAttempted }),
     },
   );
 }
@@ -368,6 +375,7 @@ export function startTemuBrowser(shopId: number): TemuShopProfile {
   if (!fs.existsSync(config.browserWorkerScript))
     throw new Error("未找到 CloakBrowser Worker 脚本。");
 
+  const credentials = getTemuShopCredentials(shopId);
   updateTemuShopRuntime(shopId, "STARTING", { error: null });
   addTemuBrowserEvent(
     shopId,
@@ -383,6 +391,12 @@ export function startTemuBrowser(shopId: number): TemuShopProfile {
       ...process.env,
       PYTHONIOENCODING: "utf-8",
       PYTHONUTF8: "1",
+      ...(credentials
+        ? {
+            TEMU_LOGIN_ACCOUNT: credentials.account,
+            TEMU_LOGIN_PASSWORD: credentials.password,
+          }
+        : {}),
     },
   });
   workers.set(shopId, { process: child, stopping: false });

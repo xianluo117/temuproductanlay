@@ -1037,6 +1037,8 @@ export function migrateTemuShopProfiles(database: Database.Database): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL CHECK (length(trim(name)) > 0),
       account_label TEXT NOT NULL CHECK (length(trim(account_label)) > 0),
+      login_account TEXT,
+      login_password_ciphertext TEXT,
       profile_key TEXT NOT NULL UNIQUE,
       mall_id TEXT UNIQUE,
       cdp_port INTEGER NOT NULL UNIQUE CHECK (cdp_port BETWEEN 1024 AND 65535),
@@ -1079,4 +1081,13 @@ export function migrateTemuShopProfiles(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_temu_browser_events_shop_created
       ON temu_browser_events(shop_profile_id, created_at DESC, id DESC);
   `);
+
+  if (!hasColumn(database, "temu_shop_profiles", "login_account")) {
+    database.exec("ALTER TABLE temu_shop_profiles ADD COLUMN login_account TEXT");
+  }
+  if (!hasColumn(database, "temu_shop_profiles", "login_password_ciphertext")) {
+    database.exec(
+      "ALTER TABLE temu_shop_profiles ADD COLUMN login_password_ciphertext TEXT",
+    );
+  }
 }

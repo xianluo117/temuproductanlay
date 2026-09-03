@@ -7,11 +7,17 @@ import type {
 } from "@temu-analytics/shared";
 import { nanoid } from "nanoid";
 import { database } from "../database/index.js";
+import {
+  decryptCredential,
+  encryptCredential,
+} from "../auth/credential-crypto.js";
 
 interface ShopRow {
   id: number;
   name: string;
   account_label: string;
+  login_account: string | null;
+  login_password_ciphertext: string | null;
   profile_key: string;
   mall_id: string | null;
   cdp_port: number;
@@ -58,6 +64,8 @@ function mapShop(row: ShopRow): TemuShopProfile {
     id: row.id,
     name: row.name,
     accountLabel: row.account_label,
+    loginAccount: row.login_account,
+    hasLoginPassword: Boolean(row.login_password_ciphertext),
     profileKey: row.profile_key,
     mallId: row.mall_id,
     cdpPort: row.cdp_port,
@@ -128,22 +136,50 @@ function replaceGrants(shopId: number, userIds: number[]): void {
   for (const userId of uniqueIds) insert.run(shopId, userId);
 }
 
+function normalizedLoginCredentials(input: {
+  loginAccount?: string | undefined;
+  loginPassword?: string | undefined;
+}, current?: TemuShopProfile): {
+  account: string | null;
+  passwordCiphertext: string | null;
+} {
+  const account =
+    input.loginAccount === undefined
+      ? (current?.loginAccount ?? null)
+      : input.loginAccount.trim() || null;
+  const hasNewPassword = input.loginPassword !== undefined && input.loginPassword.length > 0;
+  if (account && !hasNewPassword && !current?.hasLoginPassword)
+    throw new Error("配置 Temu 登录账号时必须填写密码。");
+  if (!account && hasNewPassword)
+    throw new Error("配置 Temu 登录密码时必须填写登录账号。");
+  return {
+    account,
+    passwordCiphertext: hasNewPassword
+      ? encryptCredential(input.loginPassword!)
+      : null,
+  };
+}
+
 export function createTemuShopProfile(
   input: TemuShopProfileCreateInput,
 ): TemuShopProfile {
+  const credentials = normalizedLoginCredentials(input);
   const create = database.transaction(() => {
     const profileKey = `temu/shop_${nanoid(12).toLowerCase()}`;
     const result = database
       .prepare(
         `
       INSERT INTO temu_shop_profiles (
-        name, account_label, profile_key, cdp_port, fingerprint_seed, locale, timezone, enabled
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        name, account_label, login_account, login_password_ciphertext,
+        profile_key, cdp_port, fingerprint_seed, locale, timezone, enabled
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
       )
       .run(
         input.name.trim(),
         input.accountLabel.trim(),
+        credentials.account,
+        credentials.passwordCiphertext,
         profileKey,
         nextCdpPort(),
         nanoid(32),
@@ -166,22 +202,45 @@ export function updateTemuShopProfile(
   input: TemuShopProfileUpdateInput,
 ): TemuShopProfile {
   const current = getTemuShopProfile(id);
+  const credentials = normalizedLoginCredentials(input, current);
+  const credentialsChanged =
+    input.loginAccount !== undefined || input.loginPassword !== undefined;
+  const currentCiphertext = database
+    .prepare(
+      "SELECT login_password_ciphertext FROM temu_shop_profiles WHERE id = ?",
+    )
+    .get(id) as { login_password_ciphertext: string | null };
+  const passwordCiphertext =
+    input.loginAccount !== undefined && !credentials.account
+      ? null
+      : input.loginPassword
+        ? credentials.passwordCiphertext
+        : currentCiphertext.login_password_ciphertext;
   database
     .prepare(
       `
     UPDATE temu_shop_profiles SET
-      name = ?, account_label = ?, locale = ?, timezone = ?, enabled = ?, updated_at = CURRENT_TIMESTAMP
+      name = ?, account_label = ?, login_account = ?,
+      login_password_ciphertext = ?,
+      locale = ?, timezone = ?, enabled = ?,
+      runtime_status = CASE WHEN ? = 1 THEN 'LOGIN_REQUIRED' ELSE runtime_status END,
+      last_error = CASE WHEN ? = 1 THEN NULL ELSE last_error END,
+      updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `,
     )
     .run(
       input.name?.trim() ?? current.name,
       input.accountLabel?.trim() ?? current.accountLabel,
+      credentials.account,
+      passwordCiphertext,
       input.locale ?? current.locale,
       input.timezone ?? current.timezone,
       input.enabled === undefined
         ? Number(current.enabled)
         : Number(input.enabled),
+      Number(credentialsChanged),
+      Number(credentialsChanged),
       id,
     );
   addTemuBrowserEvent(
@@ -191,6 +250,22 @@ export function updateTemuShopProfile(
     "店铺档案配置已更新。",
   );
   return getTemuShopProfile(id);
+}
+
+export function getTemuShopCredentials(id: number): {
+  account: string;
+  password: string;
+} | null {
+  const row = database
+    .prepare(
+      "SELECT login_account, login_password_ciphertext FROM temu_shop_profiles WHERE id = ?",
+    )
+    .get(id) as Pick<ShopRow, "login_account" | "login_password_ciphertext"> | undefined;
+  if (!row?.login_account || !row.login_password_ciphertext) return null;
+  return {
+    account: row.login_account,
+    password: decryptCredential(row.login_password_ciphertext),
+  };
 }
 
 export function updateTemuShopGrants(

@@ -23,6 +23,7 @@ import {
   Input,
   Layout,
   Menu,
+  Drawer,
   Modal,
   Select,
   Space,
@@ -67,6 +68,8 @@ export function App() {
   const location = useLocation();
   const { session, loading, logout, switchShop } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 900px)").matches);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [passwordForm] = Form.useForm<{
     currentPassword: string;
@@ -77,6 +80,18 @@ export function App() {
   useEffect(() => {
     if (session?.user.mustChangePassword) setPasswordOpen(true);
   }, [session?.user.mustChangePassword]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(max-width: 900px)");
+    const handleChange = (event: MediaQueryListEvent) => setIsMobile(event.matches);
+    setIsMobile(mediaQuery.matches);
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobile) setMobileNavOpen(false);
+  }, [isMobile]);
 
   if (loading)
     return (
@@ -163,51 +178,56 @@ export function App() {
       }}
     >
       {contextHolder}
-      <Layout className="app-layout">
-        <Sider
-          collapsible
-          trigger={null}
-          collapsed={collapsed}
-          width={224}
-          className="app-sider"
-        >
-          <div className="brand">
-            <CloudServerOutlined />
-            <span>{!collapsed && "Temu 数据分析"}</span>
-          </div>
-          <Menu
-            theme="dark"
-            mode="inline"
-            selectedKeys={[selected]}
-            items={menu}
-            onClick={({ key }) => navigate(key)}
-          />
-        </Sider>
-        <Layout>
-          <Header className="app-header">
+      <Layout className="app-layout app-shell">
+        {!isMobile && (
+          <Sider
+            collapsible
+            trigger={null}
+            collapsed={collapsed}
+            width={224}
+            className="app-sider"
+          >
+            <div className="brand">
+              <CloudServerOutlined />
+              <span>{!collapsed && "Temu 数据分析"}</span>
+            </div>
+            <Menu
+              theme="dark"
+              mode="inline"
+              selectedKeys={[selected]}
+              items={menu}
+              onClick={({ key }) => navigate(key)}
+            />
+          </Sider>
+        )}
+        <Layout className="app-main-layout">
+          <Header className="app-header" style={{ zIndex: 30 }}>
             <Button
               type="text"
-              icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-              onClick={() => setCollapsed(!collapsed)}
+              aria-label={isMobile ? "打开导航菜单" : collapsed ? "展开侧栏" : "收起侧栏"}
+              icon={isMobile ? <MenuUnfoldOutlined /> : collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              onClick={() => isMobile ? setMobileNavOpen(true) : setCollapsed(!collapsed)}
             />
-            <Space className="header-account">
-              <Select
-                value={session.activeShop.id}
-                style={{ width: 220 }}
-                options={session.availableShops.map((shop) => ({
-                  value: shop.id,
-                  label: `当前店铺：${shop.name}`,
-                }))}
-                onChange={(id) => void switchShop(id)}
-              />
-              <Text>
-                <UserOutlined /> {session.user.username}
-              </Text>
-              <Button onClick={() => setPasswordOpen(true)}>修改密码</Button>
-              <Button icon={<LogoutOutlined />} onClick={() => void logout()}>
-                退出
-              </Button>
-            </Space>
+            {!isMobile && (
+              <Space className="header-account">
+                <Select
+                  value={session.activeShop.id}
+                  style={{ width: 220 }}
+                  options={session.availableShops.map((shop) => ({
+                    value: shop.id,
+                    label: `当前店铺：${shop.name}`,
+                  }))}
+                  onChange={(id) => void switchShop(id)}
+                />
+                <Text>
+                  <UserOutlined /> {session.user.username}
+                </Text>
+                <Button onClick={() => setPasswordOpen(true)}>修改密码</Button>
+                <Button icon={<LogoutOutlined />} onClick={() => void logout()}>
+                  退出
+                </Button>
+              </Space>
+            )}
           </Header>
           <Content className="app-content">
             <Routes>
@@ -264,6 +284,42 @@ export function App() {
           </Content>
         </Layout>
       </Layout>
+      <Drawer
+        title={<div className="brand mobile-drawer-brand"><CloudServerOutlined /> <span>Temu 数据分析</span></div>}
+        placement="left"
+        open={mobileNavOpen}
+        onClose={() => setMobileNavOpen(false)}
+        width="min(86vw, 320px)"
+        className="mobile-nav-drawer"
+        styles={{ body: { padding: 0 }, header: { padding: 0 } }}
+      >
+        <div className="mobile-nav-content">
+          <Menu
+            theme="dark"
+            mode="inline"
+            selectedKeys={[selected]}
+            items={menu}
+            onClick={({ key }) => {
+              navigate(key);
+              setMobileNavOpen(false);
+            }}
+          />
+          <div className="mobile-nav-account">
+            <Select
+              value={session.activeShop.id}
+              className="mobile-shop-select"
+              options={session.availableShops.map((shop) => ({
+                value: shop.id,
+                label: `当前店铺：${shop.name}`,
+              }))}
+              onChange={(id) => void switchShop(id)}
+            />
+            <Text className="mobile-account-name"><UserOutlined /> {session.user.username}</Text>
+            <Button block onClick={() => { setMobileNavOpen(false); setPasswordOpen(true); }}>修改密码</Button>
+            <Button block icon={<LogoutOutlined />} onClick={() => void logout()}>退出</Button>
+          </div>
+        </div>
+      </Drawer>
       <Modal
         title="修改密码"
         open={passwordOpen}

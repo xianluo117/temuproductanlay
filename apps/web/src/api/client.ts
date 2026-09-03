@@ -17,6 +17,7 @@ import type {
   ProductBatchOperationInput,
   ProductBatchOperationResult,
   ProductDetailResponse,
+  ProductManagementBySpuResponse,
   ProductManagementColumnPreferences,
   ProductManagementListResponse,
   ProductManagementTrafficLimitSkc,
@@ -43,6 +44,8 @@ import type {
   Y2InventoryChangeLog,
   Y2InventoryImageUploadResult,
   Y2InventoryListResponse,
+  Y2InventoryQuantityUpdateInput,
+  Y2InventoryQuantityUpdateResult,
   Y2InventoryRecord,
   Y2InventoryRecordInput,
   ZhihouAccount,
@@ -172,6 +175,10 @@ export async function getY2InventoryChangeLogs(): Promise<Y2InventoryChangeLog[]
   return (await http.get<ApiResponse<Y2InventoryChangeLog[]>>("/y2-inventory/logs")).data.data;
 }
 
+export async function exportY2Inventory(): Promise<Blob> {
+  return (await http.get<Blob>("/y2-inventory/export", { responseType: "blob" })).data;
+}
+
 export async function getY2InventoryList(search?: string): Promise<Y2InventoryListResponse> {
   return (
     await http.get<ApiResponse<Y2InventoryListResponse>>("/y2-inventory", {
@@ -186,6 +193,18 @@ export async function getY2Inventory(id: number): Promise<Y2InventoryRecord> {
 
 export async function saveY2Inventory(input: Y2InventoryRecordInput): Promise<Y2InventoryRecord> {
   return (await http.put<ApiResponse<Y2InventoryRecord>>("/y2-inventory", input)).data.data;
+}
+
+export async function updateY2InventoryQuantity(
+  cellId: number,
+  input: Y2InventoryQuantityUpdateInput,
+): Promise<Y2InventoryQuantityUpdateResult> {
+  return (
+    await http.patch<ApiResponse<Y2InventoryQuantityUpdateResult>>(
+      `/y2-inventory/cells/${cellId}/quantity`,
+      input,
+    )
+  ).data.data;
 }
 
 export async function deleteY2Inventory(id: number): Promise<void> {
@@ -209,12 +228,24 @@ export interface ProductManagementSearchParams {
   skc?: string;
   sku?: string;
   productCode?: string;
+  firstListedAtStart?: string;
+  firstListedAtEnd?: string;
+  reviewProfitMarginMin?: number;
+  reviewProfitMarginMax?: number;
+  suggestedActivityDiscountMin?: number;
+  suggestedActivityDiscountMax?: number;
+  roasMin?: number;
+  roasMax?: number;
+  trafficLimitProfitMarginMin?: number;
+  trafficLimitProfitMarginMax?: number;
 }
 
 export interface ProductManagementListParams
   extends ProductManagementSearchParams {
   page?: number;
   pageSize?: 20 | 50 | 100 | 200;
+  sortBy?: "updatedAt" | "productCode" | "goodsValue" | "totalCost" | "recommendedPrice" | "spu";
+  order?: "asc" | "desc";
 }
 
 export async function getProductManagementRecords(
@@ -276,6 +307,16 @@ export async function updateProductManagementPurchaseLinks(
 
 export async function deleteProductManagementRecord(id: number): Promise<void> {
   await http.delete(`/product-management/${id}`);
+}
+
+export async function getProductManagementBySpu(
+  spu: string,
+): Promise<ProductManagementBySpuResponse> {
+  return (
+    await http.get<ApiResponse<ProductManagementBySpuResponse>>(
+      `/product-management/by-spu/${encodeURIComponent(spu)}`,
+    )
+  ).data.data;
 }
 
 export async function getProductManagementTrafficLimitSkcs(

@@ -527,6 +527,7 @@ function buildLeafSummaries(
     const pickOptions = zhihouInventoryPickOptions({
       productManagementRecordId: summary.row.productManagementRecordId,
       productCodes: summary.row.productCodes,
+      targetSpu: summary.row.parentSpu,
       targetSkcRowId: targetLifecycle?.skc_row_id ?? null,
       targetColor: summary.row.color,
       targetSize: summary.row.size,

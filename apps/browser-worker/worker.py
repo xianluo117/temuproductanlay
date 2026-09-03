@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import signal
 import sys
 import threading
@@ -40,6 +41,29 @@ def emit(event: str, **payload: Any) -> None:
     )
 
 
+def check_session_safely(
+    context: Any,
+    expected_mall_id: str | None,
+    login_account: str | None,
+    login_password: str | None,
+) -> dict[str, Any]:
+    """将会话检查失败转为状态结果，避免 Worker 退出并关闭浏览器。"""
+    try:
+        return inspect_session(
+            context,
+            expected_mall_id,
+            login_account,
+            login_password,
+        )
+    except Exception as error:  # noqa: BLE001
+        pages = context.pages
+        return {
+            "status": "ERROR",
+            "message": f"Temu 会话检查失败：{error}；浏览器已保留。",
+            "currentUrl": pages[-1].url if pages else "",
+        }
+
+
 def run() -> int:
     parser = argparse.ArgumentParser(description="CloakBrowser Temu profile worker")
     parser.add_argument("--data-root", required=True)
@@ -53,6 +77,8 @@ def run() -> int:
     args = parser.parse_args()
 
     paths = resolve_profile_paths(args.data_root, args.profile_key)
+    login_account = os.environ.get("TEMU_LOGIN_ACCOUNT")
+    login_password = os.environ.get("TEMU_LOGIN_PASSWORD")
     session: BrowserSession | None = None
     stopping = threading.Event()
 
@@ -74,7 +100,12 @@ def run() -> int:
         )
         page = session.context.pages[0] if session.context.pages else session.context.new_page()
         page.goto(TEMU_HOME, wait_until="domcontentloaded", timeout=120_000)
-        health = inspect_session(session.context, args.mall_id)
+        health = check_session_safely(
+            session.context,
+            args.mall_id,
+            login_account,
+            login_password,
+        )
         emit("ready", **health)
 
         while not stopping.is_set():
@@ -89,9 +120,22 @@ def run() -> int:
                 continue
             action = command.get("action")
             if action == "health":
-                emit("health", **inspect_session(session.context, args.mall_id))
+                emit(
+                    "health",
+                    **check_session_safely(
+                        session.context,
+                        args.mall_id,
+                        login_account,
+                        login_password,
+                    ),
+                )
             elif action == "sync_traffic_goods":
-                health = inspect_session(session.context, args.mall_id)
+                health = check_session_safely(
+                    session.context,
+                    args.mall_id,
+                    login_account,
+                    login_password,
+                )
                 if health.get("status") != "READY":
                     emit("traffic_failed", syncId=command.get("syncId"), **health)
                     continue
@@ -121,7 +165,12 @@ def run() -> int:
                         message=str(error),
                     )
             elif action == "sync_lifecycle":
-                health = inspect_session(session.context, args.mall_id)
+                health = check_session_safely(
+                    session.context,
+                    args.mall_id,
+                    login_account,
+                    login_password,
+                )
                 if health.get("status") != "READY":
                     emit("lifecycle_failed", syncId=command.get("syncId"), **health)
                     continue

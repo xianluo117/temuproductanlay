@@ -1,6 +1,7 @@
 import {
   PRODUCT_MANAGEMENT_COLUMN_KEYS,
   PRODUCT_MANAGEMENT_PAGE_SIZES,
+  type ProductLifecycleMatch,
   type ProductManagementBinding,
   type ProductManagementColumnKey,
   type ProductManagementColumnPreferences,
@@ -55,6 +56,7 @@ interface SpuRow {
   activity_discount_override: number | null;
   roas: number | null;
   order_count: number | null;
+  first_listed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -233,6 +235,7 @@ interface ProductManagementBatchData {
   bindingsBySpuLink: Map<number, ProductManagementBinding[]>;
   trafficLimitBySpu: Map<string, number>;
   imageBySpu: Map<string, ProductImageInfo>;
+  firstListedAtBySpu: Map<string, string | null>;
 }
 
 function placeholders(values: readonly unknown[]): string {
@@ -266,6 +269,7 @@ function loadBatchData(shopId: number, recordIds: number[]): ProductManagementBa
     bindingsBySpuLink: new Map(),
     trafficLimitBySpu: new Map(),
     imageBySpu: new Map(),
+    firstListedAtBySpu: new Map(),
   };
   if (!recordIds.length) return empty;
 
@@ -284,12 +288,16 @@ function loadBatchData(shopId: number, recordIds: number[]): ProductManagementBa
 
   const spuRows = database
     .prepare(
-      `SELECT id, record_id, spu, note, initial_review_price, review_price,
-              activity_discount_override, roas, order_count, created_at, updated_at
-       FROM product_management_spu_links
-       WHERE record_id IN (${recordPlaceholders}) ORDER BY record_id, id`,
+      `SELECT link.id, link.record_id, link.spu, link.note, link.initial_review_price,
+              link.review_price, link.activity_discount_override, link.roas, link.order_count,
+              product.first_listed_at, link.created_at, link.updated_at
+       FROM product_management_spu_links link
+       LEFT JOIN products product
+         ON product.shop_profile_id = ?
+        AND UPPER(TRIM(product.spu)) = UPPER(TRIM(link.spu))
+       WHERE link.record_id IN (${recordPlaceholders}) ORDER BY link.record_id, link.id`,
     )
-    .all(...recordIds) as SpuRow[];
+    .all(shopId, ...recordIds) as SpuRow[];
   for (const row of spuRows) {
     const values = empty.spuRowsByRecord.get(row.record_id) ?? [];
     values.push(row);
@@ -373,15 +381,20 @@ function spuLinksFor(
   row: RecordRow,
   settings: ProductManagementSettings,
   batch: ProductManagementBatchData,
+  lifecycleMatch: ProductLifecycleMatch,
 ): ProductManagementSpuLink[] {
   return (batch.spuRowsByRecord.get(row.id) ?? []).map((spuRow) => {
+    const lifecycleSpu = spuRow.spu
+      ? lifecycleMatch.details.find((detail) => detail.spu === spuRow.spu)
+      : undefined;
+    const reviewPrice = lifecycleSpu?.lowestSupplierPrice ?? null;
     const pricing = calculatePricing({
       goodsValue: row.goods_value,
       weightKg: row.weight_kg,
       shippingCostPerKg: settings.shippingCostPerKg,
       recommendedProfitMargin: settings.recommendedProfitMargin,
       profitThresholdRate: settings.profitThresholdRate,
-      reviewPrice: spuRow.review_price,
+      reviewPrice,
       initialReviewPrice: spuRow.initial_review_price,
       activityDiscountOverride: spuRow.activity_discount_override,
     });
@@ -402,6 +415,7 @@ function spuLinksFor(
     return {
       id: spuRow.id,
       spu: spuRow.spu,
+      firstListedAt: spuRow.first_listed_at,
       note: spuRow.note,
       localImageUrl: image?.localImageUrl ?? null,
       remoteImageUrl: image?.remoteImageUrl ?? null,
@@ -409,7 +423,7 @@ function spuLinksFor(
       imageStatus: image?.imageStatus ?? "missing",
       imageError: image?.imageError ?? null,
       initialReviewPrice: spuRow.initial_review_price,
-      reviewPrice: spuRow.review_price,
+      reviewPrice,
       reviewProfitMargin: pricing.reviewProfitMargin,
       suggestedActivityDiscount: pricing.suggestedActivityDiscount,
       activityDiscountOverride: spuRow.activity_discount_override,
@@ -466,7 +480,7 @@ function mapRecord(
     recommendedPrice: pricing.recommendedPrice,
     imageUrl: row.image_url,
     purchaseLinks: batch.purchaseLinksByRecord.get(row.id) ?? [],
-    spuLinks: spuLinksFor(row, settings, batch),
+    spuLinks: spuLinksFor(row, settings, batch, lifecycleMatch),
     lifecycleMatch,
     y2Inventory,
     createdAt: row.created_at,
@@ -479,7 +493,12 @@ export function listProductManagementRecords(
   user: UserAccount,
   scope: "mine" | "shop",
   search: ProductManagementSearch = {},
-  pagination: { page?: number; pageSize?: ProductManagementPageSize } = {},
+  pagination: {
+    page?: number;
+    pageSize?: ProductManagementPageSize;
+    sortBy?: "updatedAt" | "productCode" | "goodsValue" | "totalCost" | "recommendedPrice" | "spu" | "reviewProfitMargin" | "suggestedActivityDiscount" | "roas" | "trafficLimitProfitMargin";
+    order?: "asc" | "desc";
+  } = {},
 ): ProductManagementListResponse {
   const conditions = ["r.shop_profile_id = ?"];
   const args: Array<string | number> = [shopId];
@@ -526,6 +545,30 @@ export function listProductManagementRecords(
         AND ${exactExpression("search_binding.sku_id")} = ${placeholder}
     )`,
   );
+
+  if (search.firstListedAtStart || search.firstListedAtEnd) {
+    const listedConditions = [
+      "product.shop_profile_id = r.shop_profile_id",
+      "UPPER(TRIM(product.spu)) = UPPER(TRIM(search_spu.spu))",
+      "product.first_listed_at IS NOT NULL",
+    ];
+    const listedArgs: string[] = [];
+    if (search.firstListedAtStart) {
+      listedConditions.push("substr(product.first_listed_at, 1, 10) >= ?");
+      listedArgs.push(search.firstListedAtStart);
+    }
+    if (search.firstListedAtEnd) {
+      listedConditions.push("substr(product.first_listed_at, 1, 10) <= ?");
+      listedArgs.push(search.firstListedAtEnd);
+    }
+    conditions.push(`EXISTS (
+      SELECT 1
+      FROM product_management_spu_links search_spu
+      JOIN products product ON ${listedConditions.join(" AND ")}
+      WHERE search_spu.record_id = r.id
+    )`);
+    args.push(...listedArgs);
+  }
 
   const productCodeKeywords = splitSearchKeywords(search.productCode);
   if (productCodeKeywords.length) {
@@ -582,6 +625,9 @@ export function listProductManagementRecords(
   ).total;
   const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize);
   const page = totalPages === 0 ? 1 : Math.min(requestedPage, totalPages);
+  const settings = getProductManagementSettings();
+  const clientSortBy = pagination.sortBy ?? "updatedAt";
+  const clientSortDirection = pagination.order === "asc" ? 1 : -1;
   const rows = database
     .prepare(
       `SELECT r.*, u.username AS created_by_username
@@ -592,7 +638,6 @@ export function listProductManagementRecords(
        LIMIT ? OFFSET ?`,
     )
     .all(...args, pageSize, (page - 1) * pageSize) as RecordRow[];
-  const settings = getProductManagementSettings();
   const batch = loadBatchData(shopId, rows.map((row) => row.id));
   const lifecycleMatches = lifecycleMatchesForProducts(
     shopId,
@@ -682,7 +727,7 @@ function replaceChildren(
       normalizedText(spuLink.spu),
       normalizedText(spuLink.note),
       spuLink.initialReviewPrice,
-      spuLink.reviewPrice,
+      null,
       spuLink.activityDiscountOverride,
       spuLink.orderCount,
     );
@@ -787,6 +832,28 @@ export function updateProductManagementRecord(
   });
   update();
   return getProductManagementRecord(recordId, shopId, user);
+}
+
+export function getProductManagementRecordsBySpu(
+  spu: string,
+  shopId: number,
+  user: UserAccount,
+): { spu: string; records: ProductManagementRecord[] } {
+  const normalizedSpu = spu.trim();
+  if (!normalizedSpu) throw new Error("SPU不能为空。");
+  const rows = database
+    .prepare(
+      `SELECT DISTINCT r.id
+       FROM product_management_records r
+       JOIN product_management_spu_links link ON link.record_id = r.id
+       WHERE r.shop_profile_id = ? AND UPPER(TRIM(link.spu)) = UPPER(TRIM(?))
+       ORDER BY r.updated_at DESC, r.id DESC`,
+    )
+    .all(shopId, normalizedSpu) as Array<{ id: number }>;
+  return {
+    spu: normalizedSpu,
+    records: rows.map((row) => getProductManagementRecord(row.id, shopId, user)),
+  };
 }
 
 export function getProductManagementRecord(

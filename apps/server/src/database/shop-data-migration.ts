@@ -170,6 +170,11 @@ function createShopBusinessSchema(database: Database.Database): void {
 export function ensureShopBusinessSchema(database: Database.Database): void {
   if (hasColumn(database, "products", "shop_profile_id")) {
     createShopBusinessSchema(database);
+    if (!hasColumn(database, "daily_metrics", "click_order_conversion_rate")) {
+      database.exec(
+        "ALTER TABLE daily_metrics ADD COLUMN click_order_conversion_rate REAL",
+      );
+    }
     return;
   }
 
@@ -270,6 +275,7 @@ export function migrateBusinessDataToShops(
         orders INTEGER NOT NULL DEFAULT 0 CHECK (orders >= 0),
         detail_paid_buyers INTEGER NOT NULL DEFAULT 0 CHECK (detail_paid_buyers >= 0),
         detail_payment_conversion_rate REAL,
+        click_order_conversion_rate REAL,
         impression_order_conversion_rate REAL,
         search_impressions INTEGER NOT NULL DEFAULT 0 CHECK (search_impressions >= 0),
         raw_item_json TEXT,

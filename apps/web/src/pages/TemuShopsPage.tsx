@@ -81,6 +81,8 @@ const syncStatusLabels: Record<TemuTrafficSyncStatus["status"], string> = {
 interface ProfileForm {
   name: string;
   accountLabel: string;
+  loginAccount: string;
+  loginPassword: string;
   locale: string;
   timezone: string;
   enabled: boolean;
@@ -180,6 +182,8 @@ export function TemuShopsPage() {
     form.setFieldsValue({
       name: "",
       accountLabel: "",
+      loginAccount: "",
+      loginPassword: "",
       locale: "zh-CN",
       timezone: "Asia/Shanghai",
       enabled: true,
@@ -193,6 +197,8 @@ export function TemuShopsPage() {
     form.setFieldsValue({
       name: profile.name,
       accountLabel: profile.accountLabel,
+      loginAccount: profile.loginAccount ?? "",
+      loginPassword: "",
       locale: profile.locale,
       timezone: profile.timezone,
       enabled: profile.enabled,
@@ -345,6 +351,19 @@ export function TemuShopsPage() {
         columns={[
           { title: "店铺", dataIndex: "name", fixed: "left", width: 150 },
           { title: "账号标识", dataIndex: "accountLabel", width: 160 },
+          {
+            title: "登录账号",
+            dataIndex: "loginAccount",
+            width: 220,
+            render: (value: string | null, record: TemuShopProfile) => (
+              <Space size={6}>
+                <span>{value ?? "未配置"}</span>
+                <Tag color={record.hasLoginPassword ? "success" : "warning"}>
+                  {record.hasLoginPassword ? "密码已配置" : "密码未配置"}
+                </Tag>
+              </Space>
+            ),
+          },
           {
             title: "mallId",
             dataIndex: "mallId",
@@ -565,6 +584,37 @@ export function TemuShopsPage() {
             rules={[{ required: true }, { max: 100 }]}
           >
             <Input />
+          </Form.Item>
+          <Form.Item
+            name="loginAccount"
+            label="Temu 登录账号"
+            extra="手机号或子账号邮箱；包含 @ 时按邮箱登录处理。"
+            rules={[
+              { max: 320, message: "登录账号不能超过 320 个字符" },
+              ({ getFieldValue }) => ({
+                validator: async (_, value: string) => {
+                  if (!value || editing || getFieldValue("loginPassword")) return;
+                  throw new Error("新建店铺填写登录账号时必须同时填写密码");
+                },
+              }),
+            ]}
+          >
+            <Input placeholder="手机号或子账号邮箱" />
+          </Form.Item>
+          <Form.Item
+            name="loginPassword"
+            label="Temu 登录密码"
+            extra={editing ? "留空表示保持原密码不变。" : "首次配置登录账号时必须填写。"}
+            rules={[
+              ({ getFieldValue }) => ({
+                validator: async (_, value: string) => {
+                  if (value || editing || !getFieldValue("loginAccount")) return;
+                  throw new Error("请填写 Temu 登录密码");
+                },
+              }),
+            ]}
+          >
+            <Input.Password placeholder={editing ? "留空保持原密码" : "请输入密码"} />
           </Form.Item>
           <Form.Item
             name="accountLabel"

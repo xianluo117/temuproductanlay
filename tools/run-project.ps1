@@ -56,8 +56,11 @@ try {
     $openBrowser = Start-Process -FilePath 'node' -ArgumentList 'tools\open-browser-when-ready.mjs' -WorkingDirectory $root -PassThru -WindowStyle Hidden
     $startedProcesses.Add($openBrowser)
 
+    # 不再通过 cmd.exe /c npm start 启动服务。
+    # 嵌套 cmd 会在 Ctrl+C 时连续显示“终止批处理操作吗(Y/N)?”，并把 Ctrl+C
+    # 转换成“命令语法不正确”。直接启动已构建的 Node 入口可避免该问题。
     while (-not $stopRequested) {
-        & cmd.exe /d /c "npm start"
+        & node 'apps/server/dist/index.js'
         $exitCode = $LASTEXITCODE
         if ($exitCode -eq 75 -and -not $stopRequested) {
             Write-Host 'Backup restored. Restarting service...'
@@ -73,8 +76,4 @@ try {
     exit $exitCode
 } finally {
     Stop-StartedProcesses
-}
-
-$null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
-    # 保留退出钩子，确保窗口关闭时进入 finally 清理流程。
 }

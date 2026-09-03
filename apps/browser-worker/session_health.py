@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from temu_login import login_from_auth_page
 
 TEMU_LOGIN_MARKERS = ("login", "signin", "passport", "verify")
 
@@ -14,15 +15,32 @@ def read_mall_id(context: Any) -> str | None:
     return None
 
 
-def inspect_session(context: Any, expected_mall_id: str | None = None) -> dict[str, Any]:
-    pages = context.pages
-    if not pages:
-        return {"status": "ERROR", "message": "浏览器中没有可用页面。"}
+def _inspect_page(
+    context: Any,
+    page: Any,
+    expected_mall_id: str | None,
+    login_account: str | None,
+    login_password: str | None,
+    target_url: str,
+) -> dict[str, Any]:
+    page.goto(target_url, wait_until="domcontentloaded", timeout=120_000)
+    current_url = page.url or target_url
 
-    page = pages[-1]
-    current_url = page.url or ""
+    if "/auth/" in current_url.lower():
+        login_result = login_from_auth_page(
+            context,
+            page,
+            login_account,
+            login_password,
+        )
+        if login_result.get("status") != "READY":
+            return login_result
+        current_url = str(login_result.get("currentUrl") or page.url or "")
+
     lowered_url = current_url.lower()
-    if any(marker in lowered_url for marker in TEMU_LOGIN_MARKERS):
+    if "/auth/" in lowered_url or any(
+        marker in lowered_url for marker in TEMU_LOGIN_MARKERS
+    ):
         return {
             "status": "LOGIN_REQUIRED",
             "message": "Temu 登录状态无效，请在可视浏览器中完成登录。",
@@ -43,10 +61,34 @@ def inspect_session(context: Any, expected_mall_id: str | None = None) -> dict[s
             "mallId": mall_id,
             "currentUrl": current_url,
         }
-
     return {
         "status": "READY",
-        "message": "浏览器实例和 Temu 登录状态正常。",
+        "message": "Temu 站点登录状态正常。",
         "mallId": mall_id,
         "currentUrl": current_url,
     }
+
+
+def inspect_session(
+    context: Any,
+    expected_mall_id: str | None = None,
+    login_account: str | None = None,
+    login_password: str | None = None,
+) -> dict[str, Any]:
+    pages = context.pages
+    if not pages:
+        return {"status": "ERROR", "message": "浏览器中没有可用页面。"}
+
+    page = pages[-1]
+    original_url = page.url or ""
+    if not original_url:
+        original_url = "https://agentseller-us.temu.com/main/flux-analysis"
+
+    return _inspect_page(
+        context,
+        page,
+        expected_mall_id,
+        login_account,
+        login_password,
+        original_url,
+    )

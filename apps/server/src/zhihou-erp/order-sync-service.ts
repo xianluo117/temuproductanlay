@@ -3,6 +3,7 @@ import type {
   ZhihouOrderSyncBatch,
 } from "@temu-analytics/shared";
 import { database } from "../database/index.js";
+import { releaseInactiveZhihouStockPicks } from "./stock-pick-cleanup.js";
 import {
   erpSkuImageKey,
   lifecycleSkcImageKey,
@@ -199,6 +200,9 @@ function commitSync(
        WHERE order_no = ?`,
     );
     for (const order of orders) activateSnapshot.run(syncId, order.orderNo);
+
+    // 同步结果是订单的权威快照。快照中消失的订单不再应继续占用库存。
+    releaseInactiveZhihouStockPicks();
   });
   commit();
   return getZhihouOrderSync(syncId);

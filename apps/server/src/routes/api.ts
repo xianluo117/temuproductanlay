@@ -51,7 +51,12 @@ import {
   listY2Inventory,
   listY2InventoryChangeLogs,
   saveY2Inventory,
+  updateY2InventoryQuantity,
 } from "../inventory/y2-inventory-service.js";
+import {
+  ensureY2InventoryExport,
+  rebuildY2InventoryExport,
+} from "../inventory/y2-inventory-export-service.js";
 import { resetMissingImageAsset } from "../import/image-asset-health-service.js";
 import {
   getBatchImageProgress,
@@ -73,6 +78,7 @@ import {
   getProductManagementColumnPreferences,
   getProductManagementPageSize,
   getProductManagementRecord,
+  getProductManagementRecordsBySpu,
   listProductManagementRecords,
   updateProductManagementColumnPreferences,
   updateProductManagementPageSize,
@@ -277,6 +283,15 @@ const y2InventorySchema = z.object({
   }
 });
 
+apiRouter.get("/y2-inventory/export", async (request, response, next) => {
+  try {
+    const target = await ensureY2InventoryExport(activeShopId(request));
+    return response.download(target, "y2-inventory.xlsx");
+  } catch (error) {
+    return next(error);
+  }
+});
+
 apiRouter.get("/y2-inventory", (request, response, next) => {
   try {
     const search = z.string().trim().max(500).optional().parse(request.query.search);
@@ -338,12 +353,29 @@ apiRouter.get("/y2-inventory/:id", (request, response, next) => {
 
 apiRouter.put("/y2-inventory", (request, response, next) => {
   try {
-    response.json({
-      data: saveY2Inventory(
-        authenticatedUser(request),
-        y2InventorySchema.parse(request.body),
-      ),
-    });
+    const data = saveY2Inventory(
+      authenticatedUser(request),
+      y2InventorySchema.parse(request.body),
+    );
+    void rebuildY2InventoryExport(activeShopId(request));
+    response.json({ data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.patch("/y2-inventory/cells/:cellId/quantity", (request, response, next) => {
+  try {
+    const input = z.object({
+      quantity: z.number().int().nonnegative(),
+    }).parse(request.body);
+    const data = updateY2InventoryQuantity(
+      authenticatedUser(request),
+      z.coerce.number().int().positive().parse(request.params.cellId),
+      input.quantity,
+    );
+    void rebuildY2InventoryExport(activeShopId(request));
+    response.json({ data });
   } catch (error) {
     next(error);
   }
@@ -355,6 +387,7 @@ apiRouter.delete("/y2-inventory/:id", (request, response, next) => {
       authenticatedUser(request),
       z.coerce.number().int().positive().parse(request.params.id),
     );
+    void rebuildY2InventoryExport(activeShopId(request));
     response.status(204).end();
   } catch (error) {
     next(error);
@@ -378,7 +411,7 @@ const productManagementSpuSchema = z.object({
   spu: nullableText,
   note: z.string().max(3000).nullable().default(null),
   initialReviewPrice: nullableNumber,
-  reviewPrice: nullableNumber,
+  reviewPrice: z.null().default(null),
   activityDiscountOverride: z
     .number()
     .positive()
@@ -414,6 +447,18 @@ apiRouter.get("/product-management", (request, response, next) => {
         skc: z.string().trim().max(1000).optional(),
         sku: z.string().trim().max(1000).optional(),
         productCode: z.string().trim().max(1000).optional(),
+        firstListedAtStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        firstListedAtEnd: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        reviewProfitMarginMin: z.coerce.number().finite().min(-1).max(1).optional(),
+        reviewProfitMarginMax: z.coerce.number().finite().min(-1).max(1).optional(),
+        suggestedActivityDiscountMin: z.coerce.number().finite().min(0).max(1).optional(),
+        suggestedActivityDiscountMax: z.coerce.number().finite().min(0).max(1).optional(),
+        roasMin: z.coerce.number().finite().min(0).optional(),
+        roasMax: z.coerce.number().finite().min(0).optional(),
+        trafficLimitProfitMarginMin: z.coerce.number().finite().min(-1).max(1).optional(),
+        trafficLimitProfitMarginMax: z.coerce.number().finite().min(-1).max(1).optional(),
+        sortBy: z.enum(["updatedAt", "productCode", "goodsValue", "totalCost", "recommendedPrice", "spu"]).default("updatedAt"),
+        order: z.enum(["asc", "desc"]).default("desc"),
       })
       .parse(request.query);
     const search: {
@@ -421,11 +466,31 @@ apiRouter.get("/product-management", (request, response, next) => {
       skc?: string;
       sku?: string;
       productCode?: string;
+      firstListedAtStart?: string;
+      firstListedAtEnd?: string;
+      reviewProfitMarginMin?: number;
+      reviewProfitMarginMax?: number;
+      suggestedActivityDiscountMin?: number;
+      suggestedActivityDiscountMax?: number;
+      roasMin?: number;
+      roasMax?: number;
+      trafficLimitProfitMarginMin?: number;
+      trafficLimitProfitMarginMax?: number;
     } = {};
     if (query.spu) search.spu = query.spu;
     if (query.skc) search.skc = query.skc;
     if (query.sku) search.sku = query.sku;
     if (query.productCode) search.productCode = query.productCode;
+    if (query.firstListedAtStart) search.firstListedAtStart = query.firstListedAtStart;
+    if (query.firstListedAtEnd) search.firstListedAtEnd = query.firstListedAtEnd;
+    if (query.reviewProfitMarginMin !== undefined) search.reviewProfitMarginMin = query.reviewProfitMarginMin;
+    if (query.reviewProfitMarginMax !== undefined) search.reviewProfitMarginMax = query.reviewProfitMarginMax;
+    if (query.suggestedActivityDiscountMin !== undefined) search.suggestedActivityDiscountMin = query.suggestedActivityDiscountMin;
+    if (query.suggestedActivityDiscountMax !== undefined) search.suggestedActivityDiscountMax = query.suggestedActivityDiscountMax;
+    if (query.roasMin !== undefined) search.roasMin = query.roasMin;
+    if (query.roasMax !== undefined) search.roasMax = query.roasMax;
+    if (query.trafficLimitProfitMarginMin !== undefined) search.trafficLimitProfitMarginMin = query.trafficLimitProfitMarginMin;
+    if (query.trafficLimitProfitMarginMax !== undefined) search.trafficLimitProfitMarginMax = query.trafficLimitProfitMarginMax;
     const user = authenticatedUser(request);
     const scope = user.role === "admin" ? query.scope : "shop";
     const pageSize = (query.pageSize ?? getProductManagementPageSize(user.id)) as
@@ -438,7 +503,7 @@ apiRouter.get("/product-management", (request, response, next) => {
       user,
       scope,
       search,
-      { page: query.page, pageSize },
+      { page: query.page, pageSize, sortBy: query.sortBy, order: query.order },
     );
     response.json({ data: result });
   } catch (error) {
@@ -500,6 +565,20 @@ apiRouter.post("/product-management", (request, response, next) => {
         activeShopId(request),
         authenticatedUser(request),
         productManagementRecordSchema.parse(request.body),
+      ),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+apiRouter.get("/product-management/by-spu/:spu", (request, response, next) => {
+  try {
+    response.json({
+      data: getProductManagementRecordsBySpu(
+        decodeURIComponent(request.params.spu),
+        activeShopId(request),
+        authenticatedUser(request),
       ),
     });
   } catch (error) {

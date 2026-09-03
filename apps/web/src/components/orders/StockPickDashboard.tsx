@@ -74,6 +74,14 @@ export function StockPickDashboard({ data, loading, onMatch, onAdjust, onDelete 
   const [selectedOrders, setSelectedOrders] = useState<string[]>([]);
   const [messageApi, contextHolder] = message.useMessage();
   const completed = useMemo(() => (data?.orders ?? []).filter((order) => order.complete), [data]);
+  const orderedOrders = useMemo(
+    () => (data?.orders ?? []).map((order, index) => ({ order, index })).sort((left, right) => {
+      const productCodeComparison = left.order.productCodes.join("|").localeCompare(right.order.productCodes.join("|"), "zh-CN");
+      if (productCodeComparison !== 0) return productCodeComparison;
+      return left.index - right.index;
+    }).map(({ order }) => order),
+    [data],
+  );
   const pickMatrices = useMemo(() => buildPickMatrices(data?.picks ?? []), [data]);
   const copyOrders = async () => {
     if (!selectedOrders.length) {
@@ -140,7 +148,23 @@ export function StockPickDashboard({ data, loading, onMatch, onAdjust, onDelete 
                 bordered
                 scroll={{ x: Math.max(1280, 180 + matrix.sizes.length * 220) }}
                 columns={[
-                  { title: "颜色", dataIndex: "color", fixed: "left", width: 160, render: (value: string) => <Text strong>{value}</Text> },
+                  {
+                    title: "颜色",
+                    dataIndex: "color",
+                    fixed: "left",
+                    width: 260,
+                    render: (value: string, row: PickMatrixRow) => (
+                      <Space direction="vertical" size={2}>
+                        <Text strong>{value}</Text>
+                        <Space wrap size={[6, 2]}>
+                          {matrix.sizes.map((size) => {
+                            const quantity = row.cells[size]?.items.reduce((total, item) => total + item.pickedQuantity, 0) ?? 0;
+                            return <Text key={size} type={quantity > 0 ? "success" : "secondary"}>{size}：{quantity}件</Text>;
+                          })}
+                        </Space>
+                      </Space>
+                    ),
+                  },
                   ...matrix.sizes.map((size) => ({
                     title: size,
                     key: size,
@@ -175,7 +199,7 @@ export function StockPickDashboard({ data, loading, onMatch, onAdjust, onDelete 
         <Table<ZhihouAllocatedOrder>
           rowKey="orderNo"
           loading={loading}
-          dataSource={data?.orders ?? []}
+          dataSource={orderedOrders}
           pagination={false}
           rowSelection={{
             selectedRowKeys: selectedOrders,
@@ -184,6 +208,12 @@ export function StockPickDashboard({ data, loading, onMatch, onAdjust, onDelete 
           }}
           columns={[
             { title: "订单号", dataIndex: "orderNo" },
+            {
+              title: "货号",
+              dataIndex: "productCodes",
+              width: 180,
+              render: (codes: string[]) => <Space wrap size={[4, 4]}>{codes.map((code) => <Tag key={code}>{code}</Tag>)}</Space>,
+            },
             { title: "提交时间", dataIndex: "submittedAt", render: (value: string | null) => localDateTime(value) },
             { title: "需求", dataIndex: "requiredQuantity", width: 80 },
             { title: "已配", dataIndex: "allocatedQuantity", width: 80 },

@@ -52,6 +52,7 @@ function toSummary(
     orders: row.orders,
     detailPaidBuyers: row.detailPaidBuyers,
     detailPaymentConversionRate: row.detailPaymentConversionRate,
+    clickOrderConversionRate: row.clickOrderConversionRate,
     impressionOrderConversionRate: row.impressionOrderConversionRate,
     searchImpressions: row.searchImpressions,
     clickThroughRate: rate(row.clicks, row.impressions),
@@ -254,8 +255,8 @@ export async function commitPendingImport(
       `INSERT INTO daily_metrics
        (shop_profile_id, data_date, spu, batch_id, source_type, first_listed_at, impressions, clicks, visitors, cart_users,
         orders, detail_paid_buyers, detail_payment_conversion_rate,
-        impression_order_conversion_rate, search_impressions)
-       VALUES (?, ?, ?, ?, 'excel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        click_order_conversion_rate, impression_order_conversion_rate, search_impressions)
+       VALUES (?, ?, ?, ?, 'excel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     let queuedImageCount = 0;
 
@@ -292,6 +293,7 @@ export async function commitPendingImport(
         row.orders,
         row.detailPaidBuyers,
         row.detailPaymentConversionRate,
+        row.clickOrderConversionRate,
         row.impressionOrderConversionRate,
         row.searchImpressions,
       );

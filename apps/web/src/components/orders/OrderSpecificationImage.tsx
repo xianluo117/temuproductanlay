@@ -1,3 +1,4 @@
+import { Image } from "antd";
 import { useEffect, useState } from "react";
 
 interface Props {
@@ -30,12 +31,13 @@ export function OrderSpecificationImage({
   }
 
   return (
-    <img
+    <Image
       src={currentUrl}
+      preview={{ src: currentUrl }}
       width={width}
       height={height}
       alt="订单规格"
-      style={{ display: "block", objectFit: "cover", borderRadius: 6 }}
+      style={{ objectFit: "cover", borderRadius: 6 }}
       onError={() => setCandidateIndex((index) => index + 1)}
     />
   );

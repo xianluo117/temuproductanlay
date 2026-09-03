@@ -444,25 +444,29 @@ export function getZhihouStockPickDashboard(): ZhihouStockPickDashboard {
     allocated_quantity: number;
   }>;
   const itemRows = database.prepare(
-    `SELECT item.order_snapshot_id, allocation.pick_item_id, item.target_zhihou_sku,
-            item.target_color, item.target_size, pick.source_color, pick.source_size,
-            allocation.quantity
-     FROM zhihou_stock_pick_allocations allocation
-     JOIN zhihou_stock_order_item_snapshots item ON item.id = allocation.order_item_snapshot_id
-     JOIN zhihou_stock_order_snapshots order_row ON order_row.id = item.order_snapshot_id
-     JOIN zhihou_stock_pick_items pick ON pick.id = allocation.pick_item_id
-     WHERE order_row.is_active = 1
-     ORDER BY allocation.id`,
-  ).all() as Array<{
-    order_snapshot_id: number;
-    pick_item_id: number;
-    target_zhihou_sku: string;
-    target_color: string;
-    target_size: string;
-    source_color: string;
-    source_size: string;
-    quantity: number;
-  }>;
+    `SELECT item.order_snapshot_id, allocation.pick_item_id, product.product_code,
+            item.target_zhihou_sku, item.target_color, item.target_size,
+            pick.source_color, pick.source_size, allocation.quantity
+      FROM zhihou_stock_pick_allocations allocation
+      JOIN zhihou_stock_order_item_snapshots item ON item.id = allocation.order_item_snapshot_id
+      JOIN zhihou_stock_order_snapshots order_row ON order_row.id = item.order_snapshot_id
+      JOIN zhihou_stock_pick_items pick ON pick.id = allocation.pick_item_id
+      JOIN y2_inventory_cells cell ON cell.id = pick.inventory_cell_id
+      JOIN y2_inventory_colors color ON color.id = cell.color_row_id
+      JOIN y2_inventory_products product ON product.id = color.inventory_product_id
+      WHERE order_row.is_active = 1
+      ORDER BY allocation.id`,
+    ).all() as Array<{
+      order_snapshot_id: number;
+      pick_item_id: number;
+      product_code: string;
+      target_zhihou_sku: string;
+      target_color: string;
+      target_size: string;
+      source_color: string;
+      source_size: string;
+      quantity: number;
+    }>;
   const imageUrlsByTargetKey = new Map(
     getZhihouOrderSummary().matrices.flatMap((matrix) =>
       matrix.colorRows.flatMap((colorRow) =>
@@ -494,22 +498,27 @@ export function getZhihouStockPickDashboard(): ZhihouStockPickDashboard {
       row.active_matched_quantity + (row.picked_quantity - row.matched_quantity),
     createdAt: row.created_at,
   }));
-  const orders = orderRows.map((row) => ({
-    orderNo: row.order_no,
-    submittedAt: row.submitted_at,
-    requiredQuantity: row.required_quantity,
-    allocatedQuantity: row.allocated_quantity,
-    complete: row.allocated_quantity >= row.required_quantity,
-    items: itemRows.filter((item) => item.order_snapshot_id === row.id).map((item) => ({
-      pickItemId: item.pick_item_id,
-      targetZhihouSku: item.target_zhihou_sku,
-      targetColor: item.target_color,
-      targetSize: item.target_size,
-      sourceColor: item.source_color,
-      sourceSize: item.source_size,
-      quantity: item.quantity,
-    })),
-  }));
+  const orders = orderRows.map((row) => {
+    const items = itemRows.filter((item) => item.order_snapshot_id === row.id);
+    return {
+      orderNo: row.order_no,
+      productCodes: [...new Set(items.map((item) => item.product_code))].sort((left, right) => left.localeCompare(right, "zh-CN")),
+      submittedAt: row.submitted_at,
+      requiredQuantity: row.required_quantity,
+      allocatedQuantity: row.allocated_quantity,
+      complete: row.allocated_quantity >= row.required_quantity,
+      items: items.map((item) => ({
+        pickItemId: item.pick_item_id,
+        productCode: item.product_code,
+        targetZhihouSku: item.target_zhihou_sku,
+        targetColor: item.target_color,
+        targetSize: item.target_size,
+        sourceColor: item.source_color,
+        sourceSize: item.source_size,
+        quantity: item.quantity,
+      })),
+    };
+  });
   return {
     picks: mappedPicks,
     orders,

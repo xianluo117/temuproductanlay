@@ -196,6 +196,9 @@ beforeAll(() => {
       shopId,
       `SPU-A-${suffix}`,
     );
+  database
+    .prepare("UPDATE products SET first_listed_at = ? WHERE shop_profile_id = ? AND spu = ?")
+    .run("2026-08-15 10:20:30", shopId, `SPU-A-${suffix}`);
 });
 
 afterAll(() => {
@@ -360,6 +363,23 @@ describe("product management lifecycle integration", () => {
       displayImageUrl: `https://img.example.invalid/${suffix}.jpg`,
       imageStatus: "remote_only",
     });
+  });
+
+  it("exposes and filters SPU first listed time from SPU data", () => {
+    const matching = listProductManagementRecords(shopId, admin, "shop", {
+      firstListedAtStart: "2026-08-15",
+      firstListedAtEnd: "2026-08-15",
+    }).records;
+    expect(matching).toHaveLength(1);
+    expect(matching[0]?.spuLinks[0]).toMatchObject({
+      spu: `SPU-A-${suffix}`,
+      firstListedAt: "2026-08-15 10:20:30",
+    });
+
+    const excluded = listProductManagementRecords(shopId, admin, "shop", {
+      firstListedAtStart: "2026-08-16",
+    }).records;
+    expect(excluded).toHaveLength(0);
   });
 
   it("supports OR keywords within a field and AND across fields", () => {

@@ -47,11 +47,24 @@ export function splitSearchKeywords(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+export type ProductManagementSpuStatus = "filled" | "empty";
+export type ProductManagementOrderStatus = "hasOrders" | "noOrders" | "missing";
+
 export interface ProductManagementSearch {
   spu?: string;
   skc?: string;
   sku?: string;
   productCode?: string;
+  firstListedAtStart?: string;
+  firstListedAtEnd?: string;
+  reviewProfitMarginMin?: number;
+  reviewProfitMarginMax?: number;
+  suggestedActivityDiscountMin?: number;
+  suggestedActivityDiscountMax?: number;
+  roasMin?: number;
+  roasMax?: number;
+  trafficLimitProfitMarginMin?: number;
+  trafficLimitProfitMarginMax?: number;
 }
 
 export function normalizedSearchKeywords(value: string | undefined): string[] {
